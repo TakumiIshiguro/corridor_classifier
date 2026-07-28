@@ -1,0 +1,4 @@
+image_topic: /camera_center/image_raw
+label_topic: /cmd_dir_intersection
+passage_type_topic: /passage_type
+probabilities_topic: /corridor_classifier/probabilities

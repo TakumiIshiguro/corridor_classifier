@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<launch>
+  <arg name="config_dir" default="$(find corridor_classifier)/config"/>
+  <arg name="checkpoint_path_override" default=""/>
+  <arg name="device_override" default=""/>
+  <arg name="inference_rate_override" default="0.0"/>
+
+  <node
+    pkg="corridor_classifier"
+    type="corridor_classifier_node.py"
+    name="corridor_classifier"
+    output="screen"
+    required="true">
+    <param name="config_dir" value="$(arg config_dir)"/>
+    <param name="checkpoint_path_override" value="$(arg checkpoint_path_override)"/>
+    <param name="device_override" value="$(arg device_override)"/>
+    <param name="inference_rate_override" value="$(arg inference_rate_override)"/>
+  </node>
+</launch>

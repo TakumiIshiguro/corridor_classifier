@@ -1,0 +1,84 @@
+import os
+
+import pytest
+
+from corridor_classifier.config import (
+    load_collection_config,
+    load_config,
+    load_training_config,
+    package_root,
+    resolve_path,
+)
+
+
+def test_default_config_has_eight_unique_classes():
+    config = load_config(os.path.join(package_root(), "config"))
+
+    assert config["model"]["model_name"] == "vit_small_patch14_dinov2.lvd142m"
+    assert config["model"]["input_size"] == [224, 224]
+    assert config["model"]["num_classes"] == 8
+    assert len(set(config["model"]["class_names"])) == 8
+    assert config["runtime"] == {"inference_rate": 4.0}
+    assert config["topics"]["image_topic"] == "/camera_center/image_raw"
+    assert config["topics"]["label_topic"] == "/cmd_dir_intersection"
+    assert config["topics"]["passage_type_topic"] == "/passage_type"
+
+
+def test_resolve_path_uses_package_root_for_relative_path():
+    expected = os.path.join(package_root(), "weights", "corridor_classifier.pth")
+    assert resolve_path("weights/corridor_classifier.pth") == expected
+
+
+def test_class_count_mismatch_is_rejected(tmp_path):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "topics.yaml").write_text(
+        "image_topic: /image\n"
+        "label_topic: /labels\n"
+        "passage_type_topic: /passage\n"
+        "probabilities_topic: /probabilities\n"
+    )
+    (config_dir / "model.yaml").write_text(
+        "model:\n"
+        "  model_name: test\n"
+        "  checkpoint_path: model.pth\n"
+        "  input_size: [224, 224]\n"
+        "  num_classes: 8\n"
+        "  class_names: [a, b]\n"
+        "  device: cpu\n"
+        "  use_fp16: false\n"
+        "  strict_checkpoint: true\n"
+        "runtime:\n"
+        "  inference_rate: 1.0\n"
+    )
+
+    with pytest.raises(ValueError, match="class_names length"):
+        load_config(str(config_dir))
+
+
+def test_collection_and_training_configs_match_model_input():
+    config_dir = os.path.join(package_root(), "config")
+    collection = load_collection_config(config_dir)
+    training = load_training_config(config_dir)
+
+    assert collection["model"]["input_size"] == [224, 224]
+    assert collection["collection"]["source"] == "bag"
+    assert collection["collection"]["bag_path"].endswith(".bag")
+    assert collection["collection"]["sample_dt"] == 0.25
+    assert training["dataset"]["train_data_dir"]
+    assert isinstance(training["training"]["use_test"], bool)
+    assert (
+        0
+        <= training["training"]["freeze_backbone_epochs"]
+        <= training["training"]["epochs"]
+    )
+    assert isinstance(training["training"]["unfreeze_schedule"], list)
+    assert training["optimizer"]["name"] in ("adamw", "adam", "sgd")
+    assert training["optimizer"]["head_learning_rate"] > 0.0
+    assert training["optimizer"]["backbone_learning_rate"] > 0.0
+    assert training["scheduler"]["name"] in ("cosine", "constant")
+    assert (
+        0
+        <= training["scheduler"]["warmup_epochs"]
+        < training["training"]["epochs"]
+    )

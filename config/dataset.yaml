@@ -1,0 +1,12 @@
+paths:
+  dataset_dir: dataset/corridor
+
+collection:
+  source: bag
+  bag_path: /home/takumi/bags/sim.bag
+  dataset_type: train
+  session_name: ""
+  sample_dt: 0.25
+  label_timeout: 0.5
+  image_format: jpg
+  jpeg_quality: 95

@@ -1,0 +1,6 @@
+feature_visualization:
+  data_dir: dataset/corridor/train
+  output_dir: runs/feature_visualization
+  min_images_per_class: 2
+  max_images: 16
+  seeds: [0, 1, 2]

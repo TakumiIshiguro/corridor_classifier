@@ -1,0 +1,41 @@
+dataset:
+  train_data_dir: dataset/corridor/train
+  # test_data_dir: dataset/corridor/test
+  num_workers: 4
+
+training:
+  epochs: 10
+  batch_size: 64
+  use_test: false
+  use_amp: true
+  seed: 0
+
+  # Keep the backbone frozen for all 10 epochs.
+  freeze_backbone_epochs: 10
+  unfreeze_schedule: []
+  # Example of gradual unfreezing:
+  #   - epoch: 6
+  #     last_blocks: 2
+  #   - epoch: 16
+  #     last_blocks: 4
+  #   - epoch: 26
+  #     last_blocks: 12
+
+  pretrained_weights_path: weights/dinov2_vits14_pretrain.pth
+  output_checkpoint: weights/corridor_classifier.pth
+  final_checkpoint: weights/corridor_classifier_final.pth
+  metrics_path: runs/corridor_classifier/metrics.csv
+
+optimizer:
+  name: adamw
+  head_learning_rate: 0.001
+  backbone_learning_rate: 0.00001
+  weight_decay: 0.0001
+  betas: [0.9, 0.999]
+  epsilon: 1.0e-8
+
+scheduler:
+  name: cosine
+  warmup_epochs: 1
+  warmup_start_factor: 0.1
+  min_learning_rate_ratio: 0.01

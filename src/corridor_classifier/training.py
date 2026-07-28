@@ -1,0 +1,369 @@
+import csv
+import os
+import random
+from contextlib import nullcontext
+from math import cos, pi
+from typing import Dict, Sequence
+
+import numpy as np
+import torch
+import yaml
+from torch.optim import Adam, AdamW, SGD
+from torch.optim.lr_scheduler import LambdaLR
+from tqdm.auto import tqdm
+
+
+def set_random_seed(seed: int) -> None:
+    random.seed(int(seed))
+    np.random.seed(int(seed))
+    torch.manual_seed(int(seed))
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(int(seed))
+
+
+def last_blocks_for_epoch(
+    epoch: int,
+    freeze_backbone_epochs: int,
+    schedule: Sequence[Dict],
+) -> int:
+    if int(epoch) <= int(freeze_backbone_epochs):
+        return 0
+    last_blocks = 0
+    for entry in schedule:
+        if int(epoch) >= int(entry["epoch"]):
+            last_blocks = int(entry["last_blocks"])
+    return last_blocks
+
+
+def configure_trainable_layers(model, last_blocks: int) -> Dict[str, int]:
+    if not hasattr(model, "head") or not hasattr(model, "blocks"):
+        raise ValueError("DINO model must expose head and blocks modules")
+    block_count = len(model.blocks)
+    if last_blocks < 0 or last_blocks > block_count:
+        raise ValueError(
+            f"last_blocks must be in [0, {block_count}]: {last_blocks}"
+        )
+
+    for parameter in model.parameters():
+        parameter.requires_grad = False
+    for parameter in model.head.parameters():
+        parameter.requires_grad = True
+
+    if last_blocks >= block_count:
+        for name, parameter in model.named_parameters():
+            if not name.startswith("head."):
+                parameter.requires_grad = True
+    elif last_blocks > 0:
+        for block in model.blocks[-last_blocks:]:
+            for parameter in block.parameters():
+                parameter.requires_grad = True
+        if hasattr(model, "norm"):
+            for parameter in model.norm.parameters():
+                parameter.requires_grad = True
+
+    trainable = sum(
+        parameter.numel()
+        for parameter in model.parameters()
+        if parameter.requires_grad
+    )
+    total = sum(parameter.numel() for parameter in model.parameters())
+    return {
+        "last_blocks": int(last_blocks),
+        "trainable_parameters": int(trainable),
+        "total_parameters": int(total),
+    }
+
+
+def parameter_groups(
+    model,
+    head_learning_rate: float,
+    backbone_learning_rate: float,
+):
+    head_parameters = []
+    backbone_parameters = []
+    for name, parameter in model.named_parameters():
+        if name.startswith("head."):
+            head_parameters.append(parameter)
+        else:
+            backbone_parameters.append(parameter)
+    return [
+        {
+            "params": backbone_parameters,
+            "lr": float(backbone_learning_rate),
+            "name": "backbone",
+        },
+        {
+            "params": head_parameters,
+            "lr": float(head_learning_rate),
+            "name": "head",
+        },
+    ]
+
+
+def create_optimizer(model, config: Dict):
+    groups = parameter_groups(
+        model,
+        config["head_learning_rate"],
+        config["backbone_learning_rate"],
+    )
+    common = {
+        "params": groups,
+        "weight_decay": float(config["weight_decay"]),
+    }
+    name = str(config["name"]).lower()
+    if name == "adamw":
+        return AdamW(
+            **common,
+            betas=tuple(config["betas"]),
+            eps=float(config["epsilon"]),
+        )
+    if name == "adam":
+        return Adam(
+            **common,
+            betas=tuple(config["betas"]),
+            eps=float(config["epsilon"]),
+        )
+    if name == "sgd":
+        return SGD(
+            **common,
+            momentum=float(config["momentum"]),
+        )
+    raise ValueError(f"unsupported optimizer: {name}")
+
+
+def learning_rate_multiplier(
+    step: int,
+    total_steps: int,
+    warmup_steps: int,
+    warmup_start_factor: float,
+    scheduler_name: str,
+    min_learning_rate_ratio: float,
+) -> float:
+    step = max(0, int(step))
+    total_steps = int(total_steps)
+    warmup_steps = int(warmup_steps)
+    if total_steps <= 0:
+        raise ValueError("total_steps must be positive")
+    if warmup_steps < 0 or warmup_steps >= total_steps:
+        raise ValueError("warmup_steps must be in [0, total_steps)")
+
+    if warmup_steps > 0 and step < warmup_steps:
+        progress = step / max(1, warmup_steps - 1)
+        return float(
+            warmup_start_factor
+            + (1.0 - warmup_start_factor) * progress
+        )
+
+    name = str(scheduler_name).lower()
+    if name == "constant":
+        return 1.0
+    if name != "cosine":
+        raise ValueError(f"unsupported scheduler: {name}")
+
+    decay_steps = total_steps - warmup_steps
+    progress = (step - warmup_steps) / max(1, decay_steps - 1)
+    progress = min(1.0, max(0.0, progress))
+    cosine_factor = 0.5 * (1.0 + cos(pi * progress))
+    return float(
+        min_learning_rate_ratio
+        + (1.0 - min_learning_rate_ratio) * cosine_factor
+    )
+
+
+def create_scheduler(
+    optimizer,
+    config: Dict,
+    total_epochs: int,
+    steps_per_epoch: int,
+):
+    steps_per_epoch = int(steps_per_epoch)
+    if steps_per_epoch <= 0:
+        raise ValueError("steps_per_epoch must be positive")
+    total_steps = int(total_epochs) * steps_per_epoch
+    warmup_steps = int(config["warmup_epochs"]) * steps_per_epoch
+
+    def multiplier(step):
+        return learning_rate_multiplier(
+            step=step,
+            total_steps=total_steps,
+            warmup_steps=warmup_steps,
+            warmup_start_factor=float(config["warmup_start_factor"]),
+            scheduler_name=config["name"],
+            min_learning_rate_ratio=float(
+                config["min_learning_rate_ratio"]
+            ),
+        )
+
+    return LambdaLR(optimizer, lr_lambda=multiplier)
+
+
+def _macro_f1(confusion: torch.Tensor) -> float:
+    scores = []
+    for index in range(confusion.shape[0]):
+        true_positive = float(confusion[index, index])
+        false_positive = float(confusion[:, index].sum() - confusion[index, index])
+        false_negative = float(confusion[index, :].sum() - confusion[index, index])
+        denominator = 2.0 * true_positive + false_positive + false_negative
+        scores.append(
+            0.0 if denominator == 0.0 else 2.0 * true_positive / denominator
+        )
+    return float(sum(scores) / len(scores))
+
+
+def run_epoch(
+    model,
+    loader,
+    criterion,
+    device,
+    num_classes: int,
+    optimizer=None,
+    scheduler=None,
+    scaler=None,
+    use_amp: bool = False,
+    description: str = None,
+) -> Dict[str, float]:
+    training = optimizer is not None
+    model.train(training)
+    total_loss = 0.0
+    total_samples = 0
+    correct = 0
+    confusion = torch.zeros(num_classes, num_classes, dtype=torch.int64)
+
+    progress = tqdm(
+        loader,
+        desc=description or ("train" if training else "test"),
+        unit="batch",
+        dynamic_ncols=True,
+        mininterval=0.5,
+    )
+    for images, labels in progress:
+        images = images.to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True)
+        if training:
+            optimizer.zero_grad(set_to_none=True)
+
+        autocast_context = (
+            torch.autocast(device_type="cuda", dtype=torch.float16)
+            if use_amp
+            else nullcontext()
+        )
+        with torch.set_grad_enabled(training), autocast_context:
+            logits = model(images)
+            loss = criterion(logits, labels)
+
+        if training:
+            optimizer_stepped = True
+            if scaler is not None and scaler.is_enabled():
+                previous_scale = scaler.get_scale()
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer_stepped = scaler.get_scale() >= previous_scale
+            else:
+                loss.backward()
+                optimizer.step()
+            if scheduler is not None and optimizer_stepped:
+                scheduler.step()
+
+        predictions = torch.argmax(logits.detach(), dim=1)
+        batch_size = int(labels.shape[0])
+        total_loss += float(loss.detach()) * batch_size
+        total_samples += batch_size
+        correct += int((predictions == labels).sum())
+        for target, prediction in zip(
+            labels.detach().cpu().tolist(),
+            predictions.cpu().tolist(),
+        ):
+            confusion[int(target), int(prediction)] += 1
+        postfix = {
+            "loss": f"{total_loss / total_samples:.4f}",
+            "acc": f"{correct / total_samples:.3f}",
+        }
+        if training:
+            head_group = next(
+                (
+                    group
+                    for group in optimizer.param_groups
+                    if group.get("name") == "head"
+                ),
+                optimizer.param_groups[0],
+            )
+            postfix["lr"] = f"{float(head_group['lr']):.2e}"
+        progress.set_postfix(postfix)
+
+    if total_samples == 0:
+        raise ValueError("data loader contains no samples")
+    return {
+        "loss": total_loss / total_samples,
+        "accuracy": correct / total_samples,
+        "macro_f1": _macro_f1(confusion),
+    }
+
+
+def save_checkpoint(
+    path: str,
+    model,
+    optimizer,
+    scheduler,
+    epoch: int,
+    model_config: Dict,
+    training_config: Dict,
+    optimizer_config: Dict,
+    scheduler_config: Dict,
+    metrics: Dict,
+) -> None:
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "epoch": int(epoch),
+            "class_names": list(model_config["class_names"]),
+            "model_name": str(model_config["model_name"]),
+            "input_size": list(model_config["input_size"]),
+            "num_classes": int(model_config["num_classes"]),
+            "metrics": dict(metrics),
+            "training": dict(training_config),
+            "optimizer": dict(optimizer_config),
+            "scheduler": dict(scheduler_config),
+        },
+        path,
+    )
+
+
+def write_effective_config(path: str, config: Dict) -> None:
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "w") as stream:
+        yaml.safe_dump(config, stream, sort_keys=False)
+
+
+class MetricsWriter:
+    FIELDS = (
+        "epoch",
+        "last_blocks",
+        "trainable_parameters",
+        "backbone_learning_rate",
+        "head_learning_rate",
+        "train_loss",
+        "train_accuracy",
+        "train_macro_f1",
+        "test_loss",
+        "test_accuracy",
+        "test_macro_f1",
+    )
+
+    def __init__(self, path: str):
+        self.path = os.path.abspath(path)
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        self._stream = open(self.path, "w", newline="")
+        self._writer = csv.DictWriter(self._stream, fieldnames=self.FIELDS)
+        self._writer.writeheader()
+        self._stream.flush()
+
+    def write(self, values: Dict) -> None:
+        self._writer.writerow({key: values[key] for key in self.FIELDS})
+        self._stream.flush()
+
+    def close(self) -> None:
+        self._stream.close()

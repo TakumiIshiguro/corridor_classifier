@@ -3,4 +3,12 @@ feature_visualization:
   output_dir: runs/feature_visualization
   min_images_per_class: 2
   max_images: 16
-  seeds: [0, 1, 2]
+  seeds: [0]
+  imagenet_vit:
+    model_name: vit_small_patch16_224.augreg_in1k
+    # Leave empty to let timm download/cache the pretrained weights.
+    weights_path: ""
+  imagenet_resnet:
+    model_name: resnet18.tv_in1k
+    # Leave empty to let timm download/cache the pretrained weights.
+    weights_path: ""

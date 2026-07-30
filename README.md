@@ -223,6 +223,12 @@ roslaunch corridor_classifier visualize_features.launch
 `output_dir/YYYYMMDD_HHMMSS_microseconds/seed_<値>/`へ保存して終了します。
 ROS画像のpublishやリアルタイム表示は行わないため、通常の推論ノードには
 追加負荷がありません。
+各PNGは、入力画像、通路分類でfine-tuning済みのDINOv2 ViT-S/14特徴、
+ImageNet教師あり事前学習済みのViT-S/16特徴、ResNet-18特徴を横に並べます。
+ImageNetモデルは`feature_visualization.yaml`の`imagenet_vit`と
+`imagenet_resnet`で指定します。ResNetは最終畳み込み層の空間特徴をPCA表示
+します。`weights_path`が空の場合、初回実行時に`timm`が事前学習済み重みを
+ダウンロードし、以降はキャッシュを使用します。
 各ラベルから`min_images_per_class`枚を優先して選択します。必要枚数未満の
 ラベルはROS警告へ表示されます。
 `seeds`へ複数の整数を指定すると、ラベルごとの最低枚数を維持したまま

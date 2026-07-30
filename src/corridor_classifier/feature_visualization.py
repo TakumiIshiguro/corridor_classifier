@@ -62,6 +62,11 @@ def make_feature_panel(
     confidence: float,
     probabilities: Sequence[float],
     label_name: str = None,
+    feature_name: str = "DINOv2 fine-tuned",
+    comparison_feature_map: Image.Image = None,
+    comparison_name: str = "ImageNet ViT",
+    resnet_feature_map: Image.Image = None,
+    resnet_name: str = "ImageNet ResNet",
 ) -> Image.Image:
     image_size = (224, 224)
     header_height = 32
@@ -73,21 +78,46 @@ def make_feature_panel(
         image_size,
         Image.Resampling.NEAREST,
     )
+    columns = [
+        ("input", source),
+        (str(feature_name), features),
+    ]
+    if comparison_feature_map is not None:
+        comparison = comparison_feature_map.convert("RGB").resize(
+            image_size,
+            Image.Resampling.NEAREST,
+        )
+        columns.append((str(comparison_name), comparison))
+    if resnet_feature_map is not None:
+        resnet = resnet_feature_map.convert("RGB").resize(
+            image_size,
+            Image.Resampling.NEAREST,
+        )
+        columns.append((str(resnet_name), resnet))
     panel = Image.new(
         "RGB",
-        (image_size[0] * 2, image_size[1] + header_height),
+        (image_size[0] * len(columns), image_size[1] + header_height),
         color=(20, 20, 20),
     )
-    panel.paste(source, (0, header_height))
-    panel.paste(features, (image_size[0], header_height))
+    for column_index, (_, image) in enumerate(columns):
+        panel.paste(
+            image,
+            (column_index * image_size[0], header_height),
+        )
     draw = ImageDraw.Draw(panel)
+    for column_index, (name, _) in enumerate(columns):
+        draw.text(
+            (column_index * image_size[0] + 6, 5),
+            name,
+            fill=(255, 255, 255),
+        )
     result_text = f"pred={class_name} ({float(confidence):.3f})"
     if label_name is not None:
         result_text = f"label={label_name}  {result_text}"
     draw.text(
-        (6, 5),
-        f"input | DINOv2 patch features    {result_text}",
-        fill=(255, 255, 255),
+        (6, 18),
+        result_text,
+        fill=(190, 190, 190),
     )
     top_classes = sorted(
         enumerate(probabilities),
@@ -95,7 +125,7 @@ def make_feature_panel(
         reverse=True,
     )[:3]
     draw.text(
-        (6, 18),
+        (image_size[0] + 6, 18),
         "top3: "
         + ", ".join(
             f"{index}={float(probability):.2f}"

@@ -15,7 +15,11 @@ from corridor_classifier.config import (
     resolve_path,
 )
 from corridor_classifier.dataset import class_counts, load_dataset_samples
-from corridor_classifier.dino_classifier import DINOClassifier
+from corridor_classifier.dino_classifier import (
+    DINOClassifier,
+    PretrainedCNNFeatureExtractor,
+    PretrainedViTFeatureExtractor,
+)
 from corridor_classifier.feature_visualization import (
     make_feature_panel,
     representative_indices,
@@ -47,6 +51,24 @@ def load_visualization_config(config_dir):
     config["seeds"] = [int(seed) for seed in seeds]
     if len(set(config["seeds"])) != len(config["seeds"]):
         raise ValueError("feature_visualization.seeds must be unique")
+    for model_key in ("imagenet_vit", "imagenet_resnet"):
+        model_config = config.get(model_key, {})
+        if not isinstance(model_config, dict):
+            raise ValueError(
+                f"feature_visualization.{model_key} must be a mapping"
+            )
+        model_config = dict(model_config)
+        if not model_config.get("model_name"):
+            raise ValueError(
+                f"feature_visualization.{model_key}.model_name is required"
+            )
+        model_config["model_name"] = str(
+            model_config["model_name"]
+        ).strip()
+        model_config["weights_path"] = str(
+            model_config.get("weights_path", "") or ""
+        ).strip()
+        config[model_key] = model_config
     if config["max_images"] <= 0:
         raise ValueError("feature_visualization.max_images must be positive")
     if config["min_images_per_class"] <= 0:
@@ -81,6 +103,42 @@ def main():
     os.makedirs(output_dir, exist_ok=False)
 
     classifier = DINOClassifier(model_config, checkpoint_path)
+    imagenet_config = visualization["imagenet_vit"]
+    imagenet_weights_path = None
+    if imagenet_config["weights_path"]:
+        imagenet_weights_path = resolve_path(
+            imagenet_config["weights_path"],
+            package_root(),
+        )
+    imagenet_extractor = PretrainedViTFeatureExtractor(
+        model_name=imagenet_config["model_name"],
+        input_size=model_config["input_size"],
+        device_name=model_config["device"],
+        use_fp16=model_config["use_fp16"],
+        weights_path=imagenet_weights_path,
+    )
+    rospy.loginfo(
+        "loaded ImageNet pretrained feature extractor: %s",
+        imagenet_config["model_name"],
+    )
+    resnet_config = visualization["imagenet_resnet"]
+    resnet_weights_path = None
+    if resnet_config["weights_path"]:
+        resnet_weights_path = resolve_path(
+            resnet_config["weights_path"],
+            package_root(),
+        )
+    resnet_extractor = PretrainedCNNFeatureExtractor(
+        model_name=resnet_config["model_name"],
+        input_size=model_config["input_size"],
+        device_name=model_config["device"],
+        use_fp16=model_config["use_fp16"],
+        weights_path=resnet_weights_path,
+    )
+    rospy.loginfo(
+        "loaded ImageNet pretrained feature extractor: %s",
+        resnet_config["model_name"],
+    )
     samples = load_dataset_samples(data_dir, model_config["num_classes"])
     counts = class_counts(samples, model_config["num_classes"])
     missing_classes = [
@@ -106,7 +164,8 @@ def main():
         seed_dir = os.path.join(output_dir, f"seed_{seed}")
         os.makedirs(seed_dir, exist_ok=False)
         rospy.loginfo(
-            "seed=%d: extracting DINOv2 features from %d/%d images",
+            "seed=%d: extracting DINOv2, ViT, and ResNet features "
+            "from %d/%d images",
             seed,
             len(indices),
             len(samples),
@@ -120,6 +179,8 @@ def main():
                 source_image,
                 include_feature_map=True,
             )
+            imagenet_feature_map = imagenet_extractor.extract(source_image)
+            resnet_feature_map = resnet_extractor.extract(source_image)
             panel = make_feature_panel(
                 source_image=source_image,
                 feature_map=prediction.feature_map,
@@ -127,6 +188,10 @@ def main():
                 confidence=prediction.confidence,
                 probabilities=prediction.probabilities,
                 label_name=classifier.class_names[sample.class_index],
+                comparison_feature_map=imagenet_feature_map,
+                comparison_name="ImageNet ViT-S/16",
+                resnet_feature_map=resnet_feature_map,
+                resnet_name="ImageNet ResNet-18",
             )
             filename = (
                 f"{output_index:02d}_"

@@ -106,6 +106,30 @@ def visualize_patch_features(
     )
 
 
+def visualize_spatial_features(
+    features: torch.Tensor,
+    output_size: Tuple[int, int],
+) -> Image.Image:
+    if features.ndim != 4 or features.shape[0] != 1:
+        raise ValueError(
+            "features must have shape (1, channels, height, width), got "
+            f"{tuple(features.shape)}"
+        )
+    grid_height = int(features.shape[2])
+    grid_width = int(features.shape[3])
+    tokens = features.permute(0, 2, 3, 1).reshape(
+        1,
+        grid_height * grid_width,
+        int(features.shape[1]),
+    )
+    return visualize_patch_features(
+        features=tokens,
+        grid_size=(grid_height, grid_width),
+        num_prefix_tokens=0,
+        output_size=output_size,
+    )
+
+
 def create_dino_model(
     model_name: str,
     input_size: List[int],
@@ -125,6 +149,21 @@ def create_dino_model(
             raise ValueError(
                 "pretrained_weights_path requires pretrained=True"
             )
+        create_kwargs["pretrained_cfg_overlay"] = {
+            "file": str(pretrained_weights_path)
+        }
+    return timm.create_model(model_name, **create_kwargs)
+
+
+def create_pretrained_feature_model(
+    model_name: str,
+    pretrained_weights_path: str = None,
+) -> nn.Module:
+    create_kwargs = {
+        "pretrained": True,
+        "num_classes": 0,
+    }
+    if pretrained_weights_path is not None:
         create_kwargs["pretrained_cfg_overlay"] = {
             "file": str(pretrained_weights_path)
         }
@@ -263,3 +302,98 @@ class DINOClassifier:
             probabilities=probability_values,
             feature_map=feature_map,
         )
+
+
+class PretrainedViTFeatureExtractor:
+    def __init__(
+        self,
+        model_name: str,
+        input_size: List[int],
+        device_name: str = "auto",
+        use_fp16: bool = True,
+        weights_path: str = None,
+    ):
+        self.device = resolve_device(device_name)
+        self.use_fp16 = bool(use_fp16) and self.device.type == "cuda"
+        self.transform = build_transform(input_size)
+        self.model = create_dino_model(
+            model_name=str(model_name),
+            input_size=input_size,
+            num_classes=0,
+            pretrained=True,
+            pretrained_weights_path=weights_path,
+        )
+        if not hasattr(self.model, "forward_features"):
+            raise ValueError(f"model does not expose forward_features: {model_name}")
+        if not hasattr(self.model, "patch_embed"):
+            raise ValueError(f"model does not expose patch_embed: {model_name}")
+        if not hasattr(self.model, "num_prefix_tokens"):
+            raise ValueError(
+                f"model does not expose num_prefix_tokens: {model_name}"
+            )
+        self.model.to(self.device)
+        self.model.eval()
+
+    def extract(self, image: Image.Image) -> Image.Image:
+        if not isinstance(image, Image.Image):
+            raise TypeError("image must be a PIL.Image.Image")
+        input_tensor = self.transform(image.convert("RGB")).unsqueeze(0)
+        input_tensor = input_tensor.to(self.device, non_blocking=True)
+        autocast_context = (
+            torch.autocast(device_type="cuda", dtype=torch.float16)
+            if self.use_fp16
+            else nullcontext()
+        )
+        with torch.inference_mode(), autocast_context:
+            features = self.model.forward_features(input_tensor)
+            return visualize_patch_features(
+                features=features,
+                grid_size=self.model.patch_embed.grid_size,
+                num_prefix_tokens=self.model.num_prefix_tokens,
+                output_size=(
+                    int(input_tensor.shape[-1]),
+                    int(input_tensor.shape[-2]),
+                ),
+            )
+
+
+class PretrainedCNNFeatureExtractor:
+    def __init__(
+        self,
+        model_name: str,
+        input_size: List[int],
+        device_name: str = "auto",
+        use_fp16: bool = True,
+        weights_path: str = None,
+    ):
+        self.device = resolve_device(device_name)
+        self.use_fp16 = bool(use_fp16) and self.device.type == "cuda"
+        self.transform = build_transform(input_size)
+        self.model = create_pretrained_feature_model(
+            model_name=str(model_name),
+            pretrained_weights_path=weights_path,
+        )
+        if not hasattr(self.model, "forward_features"):
+            raise ValueError(f"model does not expose forward_features: {model_name}")
+        self.model.to(self.device)
+        self.model.eval()
+
+    def extract(self, image: Image.Image) -> Image.Image:
+        if not isinstance(image, Image.Image):
+            raise TypeError("image must be a PIL.Image.Image")
+        input_tensor = self.transform(image.convert("RGB")).unsqueeze(0)
+        input_tensor = input_tensor.to(self.device, non_blocking=True)
+        autocast_context = (
+            torch.autocast(device_type="cuda", dtype=torch.float16)
+            if self.use_fp16
+            else nullcontext()
+        )
+        with torch.inference_mode(), autocast_context:
+            features = self.model.forward_features(input_tensor)
+            return visualize_spatial_features(
+                features=features,
+                output_size=(
+                    int(input_tensor.shape[-1]),
+                    int(input_tensor.shape[-2]),
+                ),
+            )

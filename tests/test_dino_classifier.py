@@ -4,10 +4,13 @@ from torch import nn
 
 from corridor_classifier.dino_classifier import (
     DINOClassifier,
+    PretrainedCNNFeatureExtractor,
+    PretrainedViTFeatureExtractor,
     build_transform,
     create_dino_model,
     extract_state_dict,
     visualize_patch_features,
+    visualize_spatial_features,
 )
 
 
@@ -31,6 +34,31 @@ class TinyClassifier(nn.Module):
 
     def forward(self, value):
         return self.head(self.pool(value).flatten(1))
+
+
+class TinyViT(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.patch_embed = type("PatchEmbed", (), {"grid_size": (2, 2)})()
+        self.num_prefix_tokens = 1
+
+    def forward_features(self, value):
+        features = torch.arange(
+            5 * 8,
+            dtype=value.dtype,
+            device=value.device,
+        ).reshape(1, 5, 8)
+        return features.repeat(value.shape[0], 1, 1)
+
+
+class TinyCNN(nn.Module):
+    def forward_features(self, value):
+        features = torch.arange(
+            8 * 2 * 2,
+            dtype=value.dtype,
+            device=value.device,
+        ).reshape(1, 8, 2, 2)
+        return features.repeat(value.shape[0], 1, 1, 1)
 
 
 def test_transform_produces_expected_shape():
@@ -59,6 +87,17 @@ def test_patch_features_are_visualized_as_rgb_image():
     assert feature_map.mode == "RGB"
     assert feature_map.size == (224, 224)
     assert feature_map.tobytes() == repeated.tobytes()
+
+
+def test_spatial_features_are_visualized_as_rgb_image():
+    features = torch.randn(1, 32, 4, 4)
+    feature_map = visualize_spatial_features(
+        features,
+        output_size=(224, 224),
+    )
+
+    assert feature_map.mode == "RGB"
+    assert feature_map.size == (224, 224)
 
 
 def test_extract_state_dict_strips_distributed_prefix():
@@ -148,3 +187,58 @@ def test_local_pretrained_weights_are_passed_to_timm(monkeypatch, tmp_path):
     assert calls["pretrained_cfg_overlay"] == {
         "file": str(weights_path)
     }
+
+
+def test_pretrained_vit_extracts_rgb_patch_features(monkeypatch):
+    calls = {}
+
+    def fake_create_model(model_name, **kwargs):
+        calls["model_name"] = model_name
+        calls.update(kwargs)
+        return TinyViT()
+
+    monkeypatch.setattr(
+        "corridor_classifier.dino_classifier.timm.create_model",
+        fake_create_model,
+    )
+    extractor = PretrainedViTFeatureExtractor(
+        model_name="fake_imagenet_vit",
+        input_size=[32, 32],
+        device_name="cpu",
+        use_fp16=True,
+    )
+    feature_map = extractor.extract(Image.new("RGB", (64, 48)))
+
+    assert calls["model_name"] == "fake_imagenet_vit"
+    assert calls["pretrained"] is True
+    assert calls["num_classes"] == 0
+    assert feature_map.mode == "RGB"
+    assert feature_map.size == (32, 32)
+
+
+def test_pretrained_cnn_extracts_rgb_spatial_features(monkeypatch):
+    calls = {}
+
+    def fake_create_model(model_name, **kwargs):
+        calls["model_name"] = model_name
+        calls.update(kwargs)
+        return TinyCNN()
+
+    monkeypatch.setattr(
+        "corridor_classifier.dino_classifier.timm.create_model",
+        fake_create_model,
+    )
+    extractor = PretrainedCNNFeatureExtractor(
+        model_name="fake_imagenet_resnet",
+        input_size=[32, 32],
+        device_name="cpu",
+        use_fp16=True,
+    )
+    feature_map = extractor.extract(Image.new("RGB", (64, 48)))
+
+    assert calls["model_name"] == "fake_imagenet_resnet"
+    assert calls["pretrained"] is True
+    assert calls["num_classes"] == 0
+    assert "img_size" not in calls
+    assert feature_map.mode == "RGB"
+    assert feature_map.size == (32, 32)

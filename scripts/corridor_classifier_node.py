@@ -11,9 +11,12 @@ from scenario_navigation_msgs.msg import cmd_dir_intersection
 from std_msgs.msg import Float32MultiArray
 
 from corridor_classifier.config import load_config, package_root, resolve_path
-from corridor_classifier.dino_classifier import DINOClassifier
 from corridor_classifier.image_subscriber import LatestImageSubscriber
 from corridor_classifier.messages import make_passage_message
+from corridor_classifier.models import CorridorPredictor
+from corridor_classifier.synchronized_subscriber import (
+    LatestRgbDepthSubscriber,
+)
 
 
 def _apply_ros_overrides(config):
@@ -54,9 +57,14 @@ def main():
             f"{checkpoint_path}. See weights/README.md."
         )
 
-    classifier = DINOClassifier(model_config, checkpoint_path)
+    classifier = CorridorPredictor(model_config, checkpoint_path)
     bridge = CvBridge()
-    image_subscriber = LatestImageSubscriber(topics["image_topic"])
+    if classifier.use_depth:
+        subscriber = LatestRgbDepthSubscriber(
+            topics["image_topic"], topics["depth_topic"]
+        )
+    else:
+        subscriber = LatestImageSubscriber(topics["image_topic"])
     passage_publisher = rospy.Publisher(
         topics["passage_type_topic"],
         cmd_dir_intersection,
@@ -71,23 +79,38 @@ def main():
     rate_hz = float(runtime["inference_rate"])
     rate = rospy.Rate(rate_hz)
     rospy.loginfo(
-        "corridor_classifier loaded %s from %s on %s (input=%sx%s, rate=%.2f Hz)",
+        "corridor_classifier loaded architecture=%s backbone=%s from %s on %s "
+        "(input=%sx%s, sequence=%d, depth=%s, rate=%.2f Hz)",
+        model_config["architecture"],
         model_config["model_name"],
         checkpoint_path,
         classifier.device,
         model_config["input_size"][0],
         model_config["input_size"][1],
+        classifier.sequence_length,
+        classifier.use_depth,
         rate_hz,
     )
 
     while not rospy.is_shutdown():
-        image_msg = image_subscriber.take_latest()
-        if image_msg is None:
+        received = subscriber.take_latest()
+        if received is None:
             rate.sleep()
             continue
 
+        if classifier.use_depth:
+            image_msg, depth_msg = received
+        else:
+            image_msg = received
+            depth_msg = None
+
         try:
             rgb_image = bridge.imgmsg_to_cv2(image_msg, desired_encoding="rgb8")
+            depth_image = (
+                bridge.imgmsg_to_cv2(depth_msg, desired_encoding="32FC1")
+                if depth_msg is not None
+                else None
+            )
         except CvBridgeError as error:
             rospy.logwarn_throttle(
                 5.0,
@@ -96,7 +119,20 @@ def main():
             rate.sleep()
             continue
 
-        prediction = classifier.predict(PILImage.fromarray(rgb_image))
+        prediction = classifier.predict(
+            PILImage.fromarray(rgb_image),
+            depth_meters=depth_image,
+            stamp=image_msg.header.stamp.to_sec(),
+        )
+        if prediction is None:
+            rospy.loginfo_throttle(
+                2.0,
+                "collecting temporal context: %d/%d",
+                classifier.context_length,
+                classifier.sequence_length,
+            )
+            rate.sleep()
+            continue
         passage_publisher.publish(
             make_passage_message(
                 prediction.class_index,

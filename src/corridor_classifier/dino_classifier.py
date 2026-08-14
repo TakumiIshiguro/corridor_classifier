@@ -197,7 +197,7 @@ def extract_state_dict(checkpoint) -> Dict[str, torch.Tensor]:
     else:
         raise ValueError("checkpoint must be a mapping")
 
-    for prefix in ("module.", "model."):
+    for prefix in ("module.", "model.", "dino."):
         if state_dict and all(key.startswith(prefix) for key in state_dict):
             state_dict = {
                 key[len(prefix) :]: value for key, value in state_dict.items()

@@ -1,7 +1,8 @@
 model:
+  # Select one: rgb, rgb_gru, rgb_depth, rgb_depth_gru.
+  architecture: rgb_gru
   # DINOv2 ViT-S/14 is the smallest official DINOv2 backbone.
   model_name: vit_small_patch14_dinov2.lvd142m
-  checkpoint_path: weights/corridor_classifier.pth
   input_size: [224, 224]
   num_classes: 8
   class_names:
@@ -16,6 +17,46 @@ model:
   device: auto
   use_fp16: true
   strict_checkpoint: true
+
+  variants:
+    rgb:
+      checkpoint_path: weights/corridor_classifier.pth
+      sequence_length: 1
+      use_depth: false
+      use_gru: false
+
+    rgb_gru:
+      checkpoint_path: weights/corridor_classifier_rgb_gru.pth
+      sequence_length: 5
+      maximum_gap_seconds: 0.4
+      use_depth: false
+      use_gru: true
+      fusion_dim: 256
+      gru_hidden_size: 256
+      gru_num_layers: 1
+
+    rgb_depth:
+      checkpoint_path: weights/corridor_classifier_rgb_depth.pth
+      sequence_length: 1
+      use_depth: true
+      use_gru: false
+      depth_feature_dim: 128
+      fusion_dim: 256
+      depth_min_m: 0.1
+      depth_max_m: 10.0
+
+    rgb_depth_gru:
+      checkpoint_path: weights/corridor_classifier_rgb_depth_gru.pth
+      sequence_length: 5
+      maximum_gap_seconds: 0.4
+      use_depth: true
+      use_gru: true
+      depth_feature_dim: 128
+      fusion_dim: 256
+      gru_hidden_size: 256
+      gru_num_layers: 1
+      depth_min_m: 0.1
+      depth_max_m: 10.0
 
 runtime:
   inference_rate: 4.0

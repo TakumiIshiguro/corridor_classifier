@@ -3,6 +3,7 @@ project(corridor_classifier)
 
 find_package(catkin REQUIRED COMPONENTS
   cv_bridge
+  message_filters
   rospy
   scenario_navigation_msgs
   sensor_msgs
@@ -14,6 +15,7 @@ catkin_python_setup()
 catkin_package(
   CATKIN_DEPENDS
     cv_bridge
+    message_filters
     rospy
     scenario_navigation_msgs
     sensor_msgs
@@ -21,6 +23,7 @@ catkin_package(
 )
 
 catkin_install_python(PROGRAMS
+  scripts/add_depth_to_dataset.py
   scripts/create_dataset.py
   scripts/corridor_classifier_node.py
   scripts/train.py

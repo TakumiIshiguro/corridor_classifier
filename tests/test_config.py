@@ -1,4 +1,5 @@
 import os
+from copy import deepcopy
 
 import pytest
 
@@ -8,6 +9,8 @@ from corridor_classifier.config import (
     load_training_config,
     package_root,
     resolve_path,
+    _validate_config,
+    load_yaml,
 )
 
 
@@ -15,6 +18,9 @@ def test_default_config_has_eight_unique_classes():
     config = load_config(os.path.join(package_root(), "config"))
 
     assert config["model"]["model_name"] == "vit_small_patch14_dinov2.lvd142m"
+    assert config["model"]["architecture"] == "rgb_gru"
+    assert config["model"]["use_depth"] is False
+    assert config["model"]["use_gru"] is True
     assert config["model"]["input_size"] == [224, 224]
     assert config["model"]["num_classes"] == 8
     assert len(set(config["model"]["class_names"])) == 8
@@ -66,6 +72,9 @@ def test_collection_and_training_configs_match_model_input():
     assert collection["collection"]["bag_path"].endswith(".bag")
     assert collection["collection"]["sample_dt"] == 0.25
     assert training["dataset"]["train_data_dir"]
+    assert training["dataset"]["train_session_names"] == [
+        "session_20260811_010115"
+    ]
     assert isinstance(training["training"]["use_test"], bool)
     assert (
         0
@@ -82,3 +91,32 @@ def test_collection_and_training_configs_match_model_input():
         <= training["scheduler"]["warmup_epochs"]
         < training["training"]["epochs"]
     )
+
+
+@pytest.mark.parametrize(
+    "architecture,use_depth,use_gru,sequence_length",
+    [
+        ("rgb", False, False, 1),
+        ("rgb_gru", False, True, 5),
+        ("rgb_depth", True, False, 1),
+        ("rgb_depth_gru", True, True, 5),
+    ],
+)
+def test_all_architecture_configs_are_valid(
+    architecture, use_depth, use_gru, sequence_length
+):
+    config_dir = os.path.join(package_root(), "config")
+    model_data = load_yaml(os.path.join(config_dir, "model.yaml"))
+    model = deepcopy(model_data["model"])
+    model["architecture"] = architecture
+    config = {
+        "model": model,
+        "runtime": deepcopy(model_data["runtime"]),
+        "topics": load_yaml(os.path.join(config_dir, "topics.yaml")),
+    }
+
+    _validate_config(config)
+
+    assert config["model"]["use_depth"] is use_depth
+    assert config["model"]["use_gru"] is use_gru
+    assert config["model"]["sequence_length"] == sequence_length

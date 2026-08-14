@@ -4,6 +4,9 @@ from typing import Any, Dict
 import yaml
 
 
+ARCHITECTURES = ("rgb", "rgb_gru", "rgb_depth", "rgb_depth_gru")
+
+
 def package_root() -> str:
     return os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 
@@ -31,6 +34,20 @@ def _validate_config(config: Dict[str, Any]) -> None:
     model = config["model"]
     runtime = config["runtime"]
     topics = config["topics"]
+
+    architecture = str(model.get("architecture", "rgb")).strip()
+    if architecture not in ARCHITECTURES:
+        raise ValueError(
+            "model.architecture must be one of " + ", ".join(ARCHITECTURES)
+        )
+    variants = model.get("variants", {})
+    if variants:
+        if not isinstance(variants, dict) or architecture not in variants:
+            raise ValueError(
+                f"model.variants must define the active {architecture} variant"
+            )
+        model.update(dict(variants[architecture]))
+    model["architecture"] = architecture
 
     required_model_keys = (
         "model_name",
@@ -67,6 +84,41 @@ def _validate_config(config: Dict[str, Any]) -> None:
         raise ValueError("model.class_names must contain unique names")
     model["num_classes"] = num_classes
     model["class_names"] = [str(name) for name in class_names]
+    model["sequence_length"] = int(model.get("sequence_length", 1))
+    if model["sequence_length"] <= 0:
+        raise ValueError("model.sequence_length must be positive")
+    model["use_depth"] = bool(model.get("use_depth", False))
+    model["use_gru"] = bool(model.get("use_gru", False))
+    if model["use_gru"] != architecture.endswith("gru"):
+        raise ValueError("model use_gru does not match architecture")
+    if model["use_depth"] != ("depth" in architecture):
+        raise ValueError("model use_depth does not match architecture")
+    if not model["use_gru"] and model["sequence_length"] != 1:
+        raise ValueError("non-GRU architectures require sequence_length=1")
+    model["maximum_gap_seconds"] = float(
+        model.get("maximum_gap_seconds", 0.4)
+    )
+    if model["maximum_gap_seconds"] <= 0.0:
+        raise ValueError("model.maximum_gap_seconds must be positive")
+    if model["use_depth"]:
+        model["depth_min_m"] = float(model.get("depth_min_m", 0.1))
+        model["depth_max_m"] = float(model.get("depth_max_m", 10.0))
+        model["depth_feature_dim"] = int(
+            model.get("depth_feature_dim", 128)
+        )
+        if not 0.0 < model["depth_min_m"] < model["depth_max_m"]:
+            raise ValueError("depth range must satisfy 0 < min < max")
+        if model["depth_feature_dim"] <= 0:
+            raise ValueError("model.depth_feature_dim must be positive")
+    if architecture != "rgb":
+        model["fusion_dim"] = int(model.get("fusion_dim", 256))
+        if model["fusion_dim"] <= 0:
+            raise ValueError("model.fusion_dim must be positive")
+    if model["use_gru"]:
+        model["gru_hidden_size"] = int(model.get("gru_hidden_size", 256))
+        model["gru_num_layers"] = int(model.get("gru_num_layers", 1))
+        if model["gru_hidden_size"] <= 0 or model["gru_num_layers"] <= 0:
+            raise ValueError("GRU dimensions must be positive")
 
     inference_rate = float(runtime.get("inference_rate", 0.0))
     if inference_rate <= 0.0:
@@ -78,6 +130,8 @@ def _validate_config(config: Dict[str, Any]) -> None:
         "passage_type_topic",
         "probabilities_topic",
     )
+    if model["use_depth"]:
+        required_topic_keys += ("depth_topic",)
     missing = [key for key in required_topic_keys if not topics.get(key)]
     if missing:
         raise ValueError(f"topics config is missing keys: {', '.join(missing)}")
@@ -114,6 +168,7 @@ def load_collection_config(config_dir: str = None) -> Dict[str, Any]:
     )
     paths = dict(dataset_data.get("paths", {}))
     collection = dict(dataset_data.get("collection", {}))
+    depth_generation = dict(dataset_data.get("depth_generation", {}))
     if not paths.get("dataset_dir"):
         raise ValueError("dataset.yaml must define paths.dataset_dir")
     if not config["topics"].get("label_topic"):
@@ -157,8 +212,38 @@ def load_collection_config(config_dir: str = None) -> Dict[str, Any]:
             "jpeg_quality": jpeg_quality,
         }
     )
+    dataset_types = depth_generation.get("dataset_types", ["train"])
+    if not isinstance(dataset_types, list) or not dataset_types:
+        raise ValueError("depth_generation.dataset_types must be a non-empty list")
+    dataset_types = [str(value) for value in dataset_types]
+    if any(value not in ("train", "test") for value in dataset_types):
+        raise ValueError("depth_generation.dataset_types must contain train/test")
+    session_names = depth_generation.get("session_names", [])
+    if not isinstance(session_names, list):
+        raise ValueError("depth_generation.session_names must be a list")
+    unidepth_config_file = str(
+        depth_generation.get("unidepth_config_file", "")
+    ).strip()
+    if not unidepth_config_file:
+        raise ValueError("depth_generation.unidepth_config_file must not be empty")
+    stamp_tolerance = float(
+        depth_generation.get("stamp_tolerance_seconds", 0.01)
+    )
+    if stamp_tolerance < 0.0:
+        raise ValueError(
+            "depth_generation.stamp_tolerance_seconds must be non-negative"
+        )
+    depth_generation.update(
+        {
+            "dataset_types": dataset_types,
+            "session_names": [str(value) for value in session_names],
+            "unidepth_config_file": unidepth_config_file,
+            "stamp_tolerance_seconds": stamp_tolerance,
+        }
+    )
     config["paths"] = paths
     config["collection"] = collection
+    config["depth_generation"] = depth_generation
     return config
 
 
@@ -182,21 +267,26 @@ def load_training_config(config_dir: str = None) -> Dict[str, Any]:
         raise ValueError("training.yaml must define dataset.train_data_dir")
     dataset["train_data_dir"] = train_data_dir
     dataset["test_data_dir"] = test_data_dir
+    for key in ("train_session_names", "test_session_names"):
+        session_names = dataset.get(key, [])
+        if session_names is None:
+            session_names = []
+        if not isinstance(session_names, list):
+            raise ValueError(f"dataset.{key} must be a list")
+        dataset[key] = [str(name).strip() for name in session_names]
+        if any(not name for name in dataset[key]):
+            raise ValueError(f"dataset.{key} must not contain empty names")
     dataset["num_workers"] = int(dataset.get("num_workers", 0))
     if dataset["num_workers"] < 0:
         raise ValueError("dataset.num_workers must be non-negative")
 
     required_training_keys = (
         "epochs",
-        "batch_size",
         "use_amp",
         "seed",
         "freeze_backbone_epochs",
         "unfreeze_schedule",
         "pretrained_weights_path",
-        "output_checkpoint",
-        "final_checkpoint",
-        "metrics_path",
     )
     missing = [key for key in required_training_keys if key not in training]
     if missing:
@@ -212,6 +302,17 @@ def load_training_config(config_dir: str = None) -> Dict[str, Any]:
         raise ValueError(
             "training.freeze_backbone_epochs must be in [0, epochs]"
         )
+    batch_sizes = training.get("batch_size_by_architecture", {})
+    if batch_sizes:
+        if config["model"]["architecture"] not in batch_sizes:
+            raise ValueError(
+                "training.batch_size_by_architecture is missing active architecture"
+            )
+        training["batch_size"] = int(
+            batch_sizes[config["model"]["architecture"]]
+        )
+    elif "batch_size" not in training:
+        raise ValueError("training must define batch_size or batch_size_by_architecture")
     if int(training["batch_size"]) <= 0:
         raise ValueError("training.batch_size must be positive")
     use_test = bool(training.get("use_test", False))
@@ -319,6 +420,22 @@ def load_training_config(config_dir: str = None) -> Dict[str, Any]:
             "freeze_backbone_epochs": freeze_epochs,
             "unfreeze_schedule": normalized_schedule,
         }
+    )
+    checkpoint_path = str(config["model"]["checkpoint_path"])
+    checkpoint_stem, checkpoint_extension = os.path.splitext(checkpoint_path)
+    training["output_checkpoint"] = checkpoint_path
+    training["final_checkpoint"] = (
+        checkpoint_stem + "_final" + (checkpoint_extension or ".pth")
+    )
+    run_root = str(
+        training.get("run_root", "runs/corridor_classifier")
+    ).strip()
+    if not run_root:
+        raise ValueError("training.run_root must not be empty")
+    training["metrics_path"] = os.path.join(
+        run_root,
+        config["model"]["architecture"],
+        "metrics.csv",
     )
     config["dataset"] = dataset
     config["training"] = training

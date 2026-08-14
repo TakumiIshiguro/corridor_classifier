@@ -91,8 +91,12 @@ def main():
     config = load_config(config_dir)
     visualization = load_visualization_config(config_dir)
     model_config = config["model"]
+    # Feature visualization remains a comparison against the single-frame
+    # RGB classifier even when another runtime architecture is selected.
+    rgb_config = dict(model_config)
+    rgb_config.update(dict(model_config.get("variants", {}).get("rgb", {})))
     checkpoint_path = resolve_path(
-        model_config["checkpoint_path"],
+        rgb_config["checkpoint_path"],
         package_root(),
     )
     data_dir = resolve_path(visualization["data_dir"], package_root())
@@ -102,7 +106,7 @@ def main():
     )
     os.makedirs(output_dir, exist_ok=False)
 
-    classifier = DINOClassifier(model_config, checkpoint_path)
+    classifier = DINOClassifier(rgb_config, checkpoint_path)
     imagenet_config = visualization["imagenet_vit"]
     imagenet_weights_path = None
     if imagenet_config["weights_path"]:

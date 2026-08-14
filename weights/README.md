@@ -21,6 +21,14 @@ Training writes the best eight-class checkpoint to:
 weights/corridor_classifier.pth
 ```
 
+The temporal and/or depth variants use:
+
+```text
+weights/corridor_classifier_rgb_gru.pth
+weights/corridor_classifier_rgb_depth.pth
+weights/corridor_classifier_rgb_depth_gru.pth
+```
+
 The ROS inference node accepts:
 
 - a plain PyTorch state dictionary;
@@ -28,7 +36,8 @@ The ROS inference node accepts:
 - a dictionary containing `state_dict`.
 
 The model must use the same `model_name`, `input_size`, class order, and
-number of classes as `config/model.yaml`. The training script records those
-values in the checkpoint so that inference can validate the class order.
+number of classes and architecture as `config/model.yaml`. The training script
+records the temporal, GRU, fusion, and depth normalization settings in the
+checkpoint so inference can reject an incompatible model.
 
 Weights are not distributed by this package.

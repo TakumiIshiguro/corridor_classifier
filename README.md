@@ -7,7 +7,7 @@ ROS Noetic用の、DINOv2による単眼カメラ画像の通路形状分類パ�
 ## Model
 
 - Backbone: DINOv2 ViT-S/14 (`vit_small_patch14_dinov2.lvd142m`)
-- Input: RGB, 224 x 224
+- Input: RGB and optional UniDepth metric depth, 224 x 224
 - Output: 8-class logits
 - Default inference rate: 4 Hz
 
@@ -25,6 +25,17 @@ ROS Noetic用の、DINOv2による単眼カメラ画像の通路形状分類パ�
 入力画像はカメラの視野全体を残すため、アスペクト比を維持せず224 x 224へ
 リサイズします。学習時も同じ前処理を使用してください。
 
+`config/model.yaml`の`model.architecture`だけで学習・推論モデルを切り替えます。
+
+| architecture | Input | Network |
+| --- | --- | --- |
+| `rgb` | Current RGB | DINOv2 + linear head |
+| `rgb_gru` | Five RGB frames | DINOv2 + GRU |
+| `rgb_depth` | Current RGB and depth | DINOv2 + depth CNN + fusion head |
+| `rgb_depth_gru` | Five RGB/depth pairs | DINOv2 + depth CNN + GRU |
+
+学習・推論launchにarchitectureの上書き引数はありません。
+
 ## ROS interface
 
 ### Subscribed topic
@@ -32,6 +43,7 @@ ROS Noetic用の、DINOv2による単眼カメラ画像の通路形状分類パ�
 | Topic | Type | Description |
 | --- | --- | --- |
 | `/camera_center/image_raw` | `sensor_msgs/Image` | Center camera image |
+| `/unidepth/depth` | `sensor_msgs/Image` (`32FC1`) | Metric depth; subscribed only by depth architectures |
 
 ### Published topics
 
@@ -152,6 +164,18 @@ trainとtestは`config/training.yaml`の`train_data_dir`と`test_data_dir`で
 別々に指定します。testを使用する場合は`training.use_test: true`にします。
 `use_test: false`ではtestデータを読み込まず、trainデータだけで学習します。
 
+Depthモデルを学習する前に、各sessionの`metadata.yaml`に記録された元bagを
+UniDepthで再処理し、対応するメートル深度を追加します。
+
+```bash
+roslaunch corridor_classifier add_depth_to_dataset.launch
+```
+
+対象split、session名、UniDepth設定、stamp許容誤差は
+`config/dataset.yaml`の`depth_generation`で指定します。Depthは224 x 224の
+`float16` NumPy配列として`depth/`へ保存され、`samples.csv`へ
+`depth_filename`列が追加されます。
+
 ## Training
 
 学習設定は`config/training.yaml`にあります。
@@ -182,18 +206,18 @@ cosine schedulerで各optimizer stepごとに学習率を減衰します。最�
 head/backboneそれぞれの基準学習率の1%です。`scheduler.name: constant`に
 すると、warmup完了後の学習率を一定にできます。
 
-学習結果は次へ保存します。
+学習結果は選択したarchitectureごとに保存します。
 
 ```text
-weights/corridor_classifier.pth
-weights/corridor_classifier_final.pth
-weights/corridor_classifier.yaml
-runs/corridor_classifier/metrics.csv
+weights/corridor_classifier.pth                       # rgb
+weights/corridor_classifier_rgb_gru.pth
+weights/corridor_classifier_rgb_depth.pth
+weights/corridor_classifier_rgb_depth_gru.pth
+runs/corridor_classifier/<architecture>/metrics.csv
 ```
 
-`corridor_classifier.pth`はtest使用時はtest loss、testなしの場合はtrain
-lossが最小のcheckpoint、
-`corridor_classifier_final.pth`は最終epochのcheckpointです。
+各checkpointはtest使用時はtest loss、testなしの場合はtrain lossが最小の
+モデルです。最終epochは対応する`*_final.pth`へ保存します。
 
 ## Build
 

@@ -16,14 +16,12 @@ from corridor_classifier.config import (
     resolve_path,
 )
 from corridor_classifier.dataset import (
-    CorridorDataset,
+    CorridorMultiInputDataset,
     class_counts,
     load_dataset_samples,
 )
-from corridor_classifier.dino_classifier import (
-    create_dino_model,
-    resolve_device,
-)
+from corridor_classifier.dino_classifier import resolve_device
+from corridor_classifier.models import create_corridor_model
 from corridor_classifier.training import (
     MetricsWriter,
     configure_trainable_layers,
@@ -62,6 +60,7 @@ def main():
     train_samples = load_dataset_samples(
         dataset_dir=train_data_dir,
         num_classes=model_config["num_classes"],
+        session_names=dataset_config["train_session_names"],
     )
     use_test = bool(training["use_test"])
     test_data_dir = ""
@@ -74,11 +73,20 @@ def main():
         test_samples = load_dataset_samples(
             dataset_dir=test_data_dir,
             num_classes=model_config["num_classes"],
+            session_names=dataset_config["test_session_names"],
         )
 
-    train_dataset = CorridorDataset(train_samples, model_config["input_size"])
+    train_dataset = CorridorMultiInputDataset(
+        train_samples,
+        model_config["input_size"],
+        model_config,
+    )
     test_dataset = (
-        CorridorDataset(test_samples, model_config["input_size"])
+        CorridorMultiInputDataset(
+            test_samples,
+            model_config["input_size"],
+            model_config,
+        )
         if use_test
         else None
     )
@@ -111,10 +119,8 @@ def main():
         raise FileNotFoundError(
             f"DINOv2 pretrained weights were not found: {pretrained_path}"
         )
-    model = create_dino_model(
-        model_name=model_config["model_name"],
-        input_size=model_config["input_size"],
-        num_classes=model_config["num_classes"],
+    model = create_corridor_model(
+        model_config=model_config,
         pretrained=True,
         pretrained_weights_path=pretrained_path,
     )
@@ -168,7 +174,8 @@ def main():
     )
 
     print(
-        f"training samples={len(train_samples)} "
+        f"architecture={model_config['architecture']} "
+        f"training sequences={len(train_dataset)} raw samples={len(train_samples)} "
         f"use_test={use_test} test samples={len(test_samples)} device={device}"
     )
     print(

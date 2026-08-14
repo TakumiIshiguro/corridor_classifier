@@ -1,11 +1,17 @@
 dataset:
   train_data_dir: dataset/corridor/train
+  train_session_names: [session_20260811_010115]
   # test_data_dir: dataset/corridor/test
+  test_session_names: []
   num_workers: 4
 
 training:
   epochs: 10
-  batch_size: 64
+  batch_size_by_architecture:
+    rgb: 64
+    rgb_gru: 16
+    rgb_depth: 32
+    rgb_depth_gru: 8
   use_test: false
   use_amp: true
   seed: 0
@@ -22,9 +28,7 @@ training:
   #     last_blocks: 12
 
   pretrained_weights_path: weights/dinov2_vits14_pretrain.pth
-  output_checkpoint: weights/corridor_classifier.pth
-  final_checkpoint: weights/corridor_classifier_final.pth
-  metrics_path: runs/corridor_classifier/metrics.csv
+  run_root: runs/corridor_classifier
 
 optimizer:
   name: adamw

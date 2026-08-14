@@ -142,3 +142,33 @@ def test_run_epoch_updates_trainable_model():
     assert metrics["loss"] > 0.0
     assert 0.0 <= metrics["accuracy"] <= 1.0
     assert 0.0 <= metrics["macro_f1"] <= 1.0
+
+
+class DictionaryModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.head = nn.Linear(3, 3)
+
+    def forward(self, inputs):
+        return self.head(inputs["rgb"].mean(dim=(-2, -1)))
+
+
+def test_run_epoch_accepts_dictionary_inputs():
+    model = DictionaryModel()
+    dataset = [
+        ({"rgb": torch.randn(3, 2, 2)}, index % 3)
+        for index in range(6)
+    ]
+    loader = DataLoader(dataset, batch_size=3)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+
+    metrics = run_epoch(
+        model=model,
+        loader=loader,
+        criterion=nn.CrossEntropyLoss(),
+        device=torch.device("cpu"),
+        num_classes=3,
+        optimizer=optimizer,
+    )
+
+    assert metrics["loss"] > 0.0

@@ -36,9 +36,10 @@ def last_blocks_for_epoch(
 
 
 def configure_trainable_layers(model, last_blocks: int) -> Dict[str, int]:
-    if not hasattr(model, "head") or not hasattr(model, "blocks"):
+    dino = getattr(model, "dino", model)
+    if not hasattr(dino, "head") or not hasattr(dino, "blocks"):
         raise ValueError("DINO model must expose head and blocks modules")
-    block_count = len(model.blocks)
+    block_count = len(dino.blocks)
     if last_blocks < 0 or last_blocks > block_count:
         raise ValueError(
             f"last_blocks must be in [0, {block_count}]: {last_blocks}"
@@ -46,19 +47,23 @@ def configure_trainable_layers(model, last_blocks: int) -> Dict[str, int]:
 
     for parameter in model.parameters():
         parameter.requires_grad = False
-    for parameter in model.head.parameters():
+    task_parameters = (
+        model.task_parameters()
+        if hasattr(model, "task_parameters")
+        else dino.head.parameters()
+    )
+    for parameter in task_parameters:
         parameter.requires_grad = True
 
     if last_blocks >= block_count:
-        for name, parameter in model.named_parameters():
-            if not name.startswith("head."):
-                parameter.requires_grad = True
+        for parameter in dino.parameters():
+            parameter.requires_grad = True
     elif last_blocks > 0:
-        for block in model.blocks[-last_blocks:]:
+        for block in dino.blocks[-last_blocks:]:
             for parameter in block.parameters():
                 parameter.requires_grad = True
-        if hasattr(model, "norm"):
-            for parameter in model.norm.parameters():
+        if hasattr(dino, "norm"):
+            for parameter in dino.norm.parameters():
                 parameter.requires_grad = True
 
     trainable = sum(
@@ -79,13 +84,18 @@ def parameter_groups(
     head_learning_rate: float,
     backbone_learning_rate: float,
 ):
-    head_parameters = []
-    backbone_parameters = []
-    for name, parameter in model.named_parameters():
-        if name.startswith("head."):
-            head_parameters.append(parameter)
-        else:
-            backbone_parameters.append(parameter)
+    dino = getattr(model, "dino", model)
+    task_parameters = list(
+        model.task_parameters()
+        if hasattr(model, "task_parameters")
+        else dino.head.parameters()
+    )
+    task_ids = {id(parameter) for parameter in task_parameters}
+    backbone_parameters = [
+        parameter
+        for parameter in model.parameters()
+        if id(parameter) not in task_ids
+    ]
     return [
         {
             "params": backbone_parameters,
@@ -93,7 +103,7 @@ def parameter_groups(
             "name": "backbone",
         },
         {
-            "params": head_parameters,
+            "params": task_parameters,
             "lr": float(head_learning_rate),
             "name": "head",
         },
@@ -236,8 +246,14 @@ def run_epoch(
         dynamic_ncols=True,
         mininterval=0.5,
     )
-    for images, labels in progress:
-        images = images.to(device, non_blocking=True)
+    for inputs, labels in progress:
+        if isinstance(inputs, dict):
+            inputs = {
+                key: value.to(device, non_blocking=True)
+                for key, value in inputs.items()
+            }
+        else:
+            inputs = inputs.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
         if training:
             optimizer.zero_grad(set_to_none=True)
@@ -248,7 +264,7 @@ def run_epoch(
             else nullcontext()
         )
         with torch.set_grad_enabled(training), autocast_context:
-            logits = model(images)
+            logits = model(inputs)
             loss = criterion(logits, labels)
 
         if training:
@@ -323,6 +339,23 @@ def save_checkpoint(
             "model_name": str(model_config["model_name"]),
             "input_size": list(model_config["input_size"]),
             "num_classes": int(model_config["num_classes"]),
+            "architecture": str(model_config.get("architecture", "rgb")),
+            "variant": {
+                key: model_config[key]
+                for key in (
+                    "sequence_length",
+                    "maximum_gap_seconds",
+                    "use_depth",
+                    "use_gru",
+                    "depth_feature_dim",
+                    "depth_min_m",
+                    "depth_max_m",
+                    "fusion_dim",
+                    "gru_hidden_size",
+                    "gru_num_layers",
+                )
+                if key in model_config
+            },
             "metrics": dict(metrics),
             "training": dict(training_config),
             "optimizer": dict(optimizer_config),

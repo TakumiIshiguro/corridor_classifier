@@ -1,8 +1,12 @@
+import numpy as np
+import pytest
 from PIL import Image
 
 from corridor_classifier.collection import DatasetSessionWriter
 from corridor_classifier.dataset import (
     CorridorDataset,
+    CorridorMultiInputDataset,
+    CorridorSample,
     load_dataset_samples,
 )
 
@@ -40,6 +44,32 @@ def test_train_and_test_datasets_are_loaded_separately(tmp_path):
     assert test_samples[0].class_index == 4
 
 
+def test_dataset_can_select_named_sessions(tmp_path):
+    make_session(tmp_path, "train", "old_session", 1)
+    make_session(tmp_path, "train", "latest_session", 6)
+
+    samples = load_dataset_samples(
+        str(tmp_path / "train"),
+        8,
+        session_names=["latest_session"],
+    )
+
+    assert len(samples) == 1
+    assert samples[0].session_name == "latest_session"
+    assert samples[0].class_index == 6
+
+
+def test_missing_selected_session_is_rejected(tmp_path):
+    make_session(tmp_path, "train", "existing_session", 1)
+
+    with pytest.raises(ValueError, match="missing_session"):
+        load_dataset_samples(
+            str(tmp_path / "train"),
+            8,
+            session_names=["missing_session"],
+        )
+
+
 def test_dataset_returns_normalized_224_tensor(tmp_path):
     make_session(tmp_path, "train", "session_0", 3)
     train_samples = load_dataset_samples(str(tmp_path / "train"), 8)
@@ -48,3 +78,50 @@ def test_dataset_returns_normalized_224_tensor(tmp_path):
     image, label = dataset[0]
     assert image.shape == (3, 224, 224)
     assert label == 3
+
+
+def test_temporal_depth_dataset_uses_final_label_and_stays_in_session(tmp_path):
+    samples = []
+    for index in range(3):
+        image_path = tmp_path / f"{index}.png"
+        depth_path = tmp_path / f"{index}.npy"
+        Image.new("RGB", (224, 224)).save(image_path)
+        np.save(depth_path, np.full((224, 224), index + 1, np.float32))
+        samples.append(
+            CorridorSample(
+                image_path=str(image_path),
+                depth_path=str(depth_path),
+                class_index=index,
+                session_name="session_a",
+                stamp=1.0 + index * 0.25,
+            )
+        )
+    dataset = CorridorMultiInputDataset(
+        samples,
+        [224, 224],
+        {
+            "sequence_length": 3,
+            "maximum_gap_seconds": 0.4,
+            "use_depth": True,
+            "depth_min_m": 0.1,
+            "depth_max_m": 10.0,
+        },
+    )
+
+    inputs, label = dataset[0]
+    assert inputs["rgb"].shape == (3, 3, 224, 224)
+    assert inputs["depth"].shape == (3, 2, 224, 224)
+    assert label == 2
+
+
+def test_depth_dataset_rejects_samples_without_depth(tmp_path):
+    image_path = tmp_path / "image.png"
+    Image.new("RGB", (224, 224)).save(image_path)
+    sample = CorridorSample(str(image_path), 0, "session", stamp=1.0)
+
+    with pytest.raises(ValueError, match="no valid sequences"):
+        CorridorMultiInputDataset(
+            [sample],
+            [224, 224],
+            {"sequence_length": 1, "use_depth": True},
+        )

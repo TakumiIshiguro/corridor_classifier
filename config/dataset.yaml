@@ -3,10 +3,17 @@ paths:
 
 collection:
   source: bag
-  bag_path: /home/takumi/bags/sim.bag
+  bag_path: /home/takumi/bags/2026-08-11-00-08-45.bag
   dataset_type: train
   session_name: ""
   sample_dt: 0.25
   label_timeout: 0.5
   image_format: jpg
   jpeg_quality: 95
+
+depth_generation:
+  # Empty selects every session in dataset_types.
+  dataset_types: [train]
+  session_names: [session_20260811_010115]
+  unidepth_config_file: ../UniDepth/unidepth_ros/config/unidepth.yaml
+  stamp_tolerance_seconds: 0.01

@@ -125,3 +125,49 @@ def test_depth_dataset_rejects_samples_without_depth(tmp_path):
             [224, 224],
             {"sequence_length": 1, "use_depth": True},
         )
+
+
+def test_temporal_dataset_uses_frame_stride_and_sequence_step(tmp_path):
+    samples = []
+    for index in range(13):
+        image_path = tmp_path / f"stride_{index}.png"
+        Image.new("RGB", (224, 224)).save(image_path)
+        samples.append(
+            CorridorSample(
+                image_path=str(image_path),
+                class_index=index % 8,
+                session_name="session",
+                stamp=1.0 + index * 0.25,
+            )
+        )
+    dataset = CorridorMultiInputDataset(
+        samples,
+        [224, 224],
+        {
+            "sequence_length": 3,
+            "frame_stride": 4,
+            "maximum_gap_seconds": 0.4,
+            "use_depth": False,
+        },
+        sequence_step=4,
+    )
+
+    assert len(dataset) == 2
+    assert [sample.class_index for sample in dataset.sequences[0]] == [0, 4, 0]
+    assert [sample.class_index for sample in dataset.sequences[1]] == [4, 0, 4]
+
+
+def test_horizontal_flip_remaps_directional_label(tmp_path):
+    image_path = tmp_path / "image.png"
+    Image.new("RGB", (224, 224)).save(image_path)
+    sample = CorridorSample(str(image_path), 2, "session", stamp=1.0)
+    dataset = CorridorMultiInputDataset(
+        [sample],
+        [224, 224],
+        {"sequence_length": 1, "use_depth": False},
+        augmentation_config={"horizontal_flip_probability": 1.0},
+    )
+
+    _, label = dataset[0]
+
+    assert label == 3

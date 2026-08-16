@@ -234,13 +234,17 @@ class CorridorPredictor:
         )
         self.transform = build_transform(model_config["input_size"])
         self.sequence_length = int(model_config["sequence_length"])
+        self.frame_stride = int(model_config.get("frame_stride", 1))
+        self.required_context_length = (
+            (self.sequence_length - 1) * self.frame_stride + 1
+        )
         self.maximum_gap_seconds = float(
             model_config.get("maximum_gap_seconds", 0.4)
         )
         self.use_depth = bool(model_config["use_depth"])
-        self._rgb = deque(maxlen=self.sequence_length)
-        self._depth = deque(maxlen=self.sequence_length)
-        self._features = deque(maxlen=self.sequence_length)
+        self._rgb = deque(maxlen=self.required_context_length)
+        self._depth = deque(maxlen=self.required_context_length)
+        self._features = deque(maxlen=self.required_context_length)
         self._last_stamp = None
         self.model = create_corridor_model(model_config)
         load_model_checkpoint(self.model, model_config, checkpoint_path)
@@ -309,16 +313,20 @@ class CorridorPredictor:
                     ),
                 )[0]
                 self._features.append(feature)
-                if len(self._features) < self.sequence_length:
+                if len(self._features) < self.required_context_length:
                     return None
+                features = tuple(self._features)[:: self.frame_stride]
                 logits = self.model.classify_features(
-                    torch.stack(tuple(self._features)).unsqueeze(0)
+                    torch.stack(features).unsqueeze(0)
                 )
             else:
                 self._rgb.append(rgb_tensor)
+                if len(self._rgb) < self.required_context_length:
+                    return None
+                rgb = tuple(self._rgb)[:: self.frame_stride]
                 logits = self.model(
                     {
-                        "rgb": torch.stack(tuple(self._rgb))
+                        "rgb": torch.stack(rgb)
                         .unsqueeze(0)
                         .to(self.device, non_blocking=True)
                     }

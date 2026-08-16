@@ -80,7 +80,7 @@ def main():
     rate = rospy.Rate(rate_hz)
     rospy.loginfo(
         "corridor_classifier loaded architecture=%s backbone=%s from %s on %s "
-        "(input=%sx%s, sequence=%d, depth=%s, rate=%.2f Hz)",
+        "(input=%sx%s, sequence=%d, stride=%d, depth=%s, rate=%.2f Hz)",
         model_config["architecture"],
         model_config["model_name"],
         checkpoint_path,
@@ -88,6 +88,7 @@ def main():
         model_config["input_size"][0],
         model_config["input_size"][1],
         classifier.sequence_length,
+        classifier.frame_stride,
         classifier.use_depth,
         rate_hz,
     )
@@ -129,7 +130,7 @@ def main():
                 2.0,
                 "collecting temporal context: %d/%d",
                 classifier.context_length,
-                classifier.sequence_length,
+                classifier.required_context_length,
             )
             rate.sleep()
             continue

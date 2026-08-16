@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../s
 import rospy
 import torch
 from torch import nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from corridor_classifier.config import (
     load_training_config,
@@ -24,12 +24,14 @@ from corridor_classifier.dino_classifier import resolve_device
 from corridor_classifier.models import create_corridor_model
 from corridor_classifier.training import (
     MetricsWriter,
+    class_weights_from_counts,
     configure_trainable_layers,
     create_optimizer,
     create_scheduler,
     last_blocks_for_epoch,
     run_epoch,
     save_checkpoint,
+    sequence_sampling_weights,
     set_random_seed,
     write_effective_config,
 )
@@ -80,12 +82,15 @@ def main():
         train_samples,
         model_config["input_size"],
         model_config,
+        augmentation_config=training.get("augmentation"),
+        sequence_step=dataset_config.get("train_sequence_step", 1),
     )
     test_dataset = (
         CorridorMultiInputDataset(
             test_samples,
             model_config["input_size"],
             model_config,
+            sequence_step=dataset_config.get("test_sequence_step", 1),
         )
         if use_test
         else None
@@ -99,9 +104,31 @@ def main():
         "pin_memory": device.type == "cuda",
     }
     generator = torch.Generator().manual_seed(training["seed"])
+    sampling_strategy = str(training.get("sampling_strategy", "shuffle"))
+    sampler = None
+    if sampling_strategy == "class_session_inverse_sqrt":
+        sampling_weights = sequence_sampling_weights(
+            [sequence[-1].class_index for sequence in train_dataset.sequences],
+            [sequence[-1].session_name for sequence in train_dataset.sequences],
+            maximum_class_factor=float(
+                training.get("maximum_sampling_class_factor", 4.0)
+            ),
+            maximum_session_factor=float(
+                training.get("maximum_sampling_session_factor", 4.0)
+            ),
+        )
+        sampler = WeightedRandomSampler(
+            sampling_weights,
+            num_samples=len(train_dataset),
+            replacement=True,
+            generator=generator,
+        )
+    elif sampling_strategy != "shuffle":
+        raise ValueError(f"unsupported sampling strategy: {sampling_strategy}")
     train_loader = DataLoader(
         train_dataset,
-        shuffle=True,
+        shuffle=sampler is None,
+        sampler=sampler,
         generator=generator,
         **loader_kwargs,
     )
@@ -132,7 +159,17 @@ def main():
         total_epochs=training["epochs"],
         steps_per_epoch=len(train_loader),
     )
-    criterion = nn.CrossEntropyLoss()
+    train_sequence_counts = class_counts(
+        [sequence[-1] for sequence in train_dataset.sequences],
+        model_config["num_classes"],
+    )
+    class_weights = class_weights_from_counts(
+        train_sequence_counts,
+        method=training.get("class_weighting", "none"),
+        maximum_weight=float(training.get("maximum_class_weight", 4.0)),
+    ).to(device)
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    evaluation_criterion = nn.CrossEntropyLoss()
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
     output_checkpoint = resolve_path(
@@ -182,6 +219,9 @@ def main():
         "train class counts="
         f"{effective_config['dataset']['train_class_counts']}"
     )
+    print(f"train sequence class counts={train_sequence_counts}")
+    print(f"loss class weights={class_weights.cpu().tolist()}")
+    print(f"sampling strategy={sampling_strategy}")
     if use_test:
         print(
             "test class counts="
@@ -200,7 +240,16 @@ def main():
             + ", ".join(missing_classes)
         )
 
-    best_monitored_loss = float("inf")
+    checkpoint_metric = str(
+        training.get(
+            "checkpoint_metric",
+            "test_macro_f1" if use_test else "train_macro_f1",
+        )
+    )
+    maximize_checkpoint_metric = checkpoint_metric.endswith("macro_f1")
+    best_monitored_value = (
+        float("-inf") if maximize_checkpoint_metric else float("inf")
+    )
     metrics_writer = MetricsWriter(metrics_path)
     try:
         current_last_blocks = None
@@ -238,7 +287,7 @@ def main():
                 run_epoch(
                     model=model,
                     loader=test_loader,
-                    criterion=criterion,
+                    criterion=evaluation_criterion,
                     device=device,
                     num_classes=model_config["num_classes"],
                     use_amp=use_amp,
@@ -293,13 +342,22 @@ def main():
                 )
             print(message)
 
-            monitored_loss = (
-                test_metrics["loss"]
-                if test_metrics is not None
-                else train_metrics["loss"]
+            metric_source, metric_name = checkpoint_metric.split("_", 1)
+            monitored_metrics = (
+                test_metrics if metric_source == "test" else train_metrics
             )
-            if monitored_loss < best_monitored_loss:
-                best_monitored_loss = monitored_loss
+            if monitored_metrics is None or metric_name not in monitored_metrics:
+                raise ValueError(
+                    f"checkpoint metric is unavailable: {checkpoint_metric}"
+                )
+            monitored_value = float(monitored_metrics[metric_name])
+            improved = (
+                monitored_value > best_monitored_value
+                if maximize_checkpoint_metric
+                else monitored_value < best_monitored_value
+            )
+            if improved:
+                best_monitored_value = monitored_value
                 save_checkpoint(
                     output_checkpoint,
                     model,
@@ -312,7 +370,10 @@ def main():
                     scheduler_config,
                     row,
                 )
-                print(f"saved best checkpoint: {output_checkpoint}")
+                print(
+                    f"saved best checkpoint: {output_checkpoint} "
+                    f"({checkpoint_metric}={monitored_value:.6f})"
+                )
 
         save_checkpoint(
             final_checkpoint,

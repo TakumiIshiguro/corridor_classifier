@@ -4,6 +4,7 @@ from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from corridor_classifier.training import (
+    class_weights_from_counts,
     configure_trainable_layers,
     create_optimizer,
     create_scheduler,
@@ -11,7 +12,30 @@ from corridor_classifier.training import (
     learning_rate_multiplier,
     parameter_groups,
     run_epoch,
+    sequence_sampling_weights,
 )
+
+
+def test_inverse_sqrt_class_weights_ignore_missing_classes_and_are_capped():
+    weights = class_weights_from_counts(
+        [100, 25, 0],
+        method="inverse_sqrt",
+        maximum_weight=1.5,
+    )
+
+    assert weights[1] > weights[0]
+    assert weights[2] == 0.0
+    assert torch.isclose(weights[:2].mean(), torch.tensor(1.0))
+
+
+def test_sequence_sampling_weights_favor_rare_classes_and_sessions():
+    weights = sequence_sampling_weights(
+        labels=[0, 0, 0, 1],
+        sessions=["large", "large", "large", "small"],
+    )
+
+    assert weights[-1] > weights[0]
+    assert torch.isclose(weights.mean(), torch.tensor(1.0, dtype=torch.double))
 
 
 class FakeDINO(nn.Module):

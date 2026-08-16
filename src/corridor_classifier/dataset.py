@@ -2,6 +2,7 @@ import csv
 import os
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+import random
 from typing import List, Optional, Sequence
 
 import numpy as np
@@ -161,15 +162,51 @@ class CorridorMultiInputDataset(Dataset):
         samples: Sequence[CorridorSample],
         input_size: Sequence[int],
         variant_config: dict,
+        augmentation_config: Optional[dict] = None,
+        sequence_step: int = 1,
     ):
         self.input_size = (int(input_size[0]), int(input_size[1]))
         self.sequence_length = int(variant_config["sequence_length"])
+        self.frame_stride = int(variant_config.get("frame_stride", 1))
+        self.sequence_step = int(sequence_step)
+        if self.frame_stride <= 0:
+            raise ValueError("frame_stride must be positive")
+        if self.sequence_step <= 0:
+            raise ValueError("sequence_step must be positive")
+        self.required_span = (
+            (self.sequence_length - 1) * self.frame_stride + 1
+        )
         self.maximum_gap_seconds = float(
             variant_config.get("maximum_gap_seconds", 0.4)
         )
         self.use_depth = bool(variant_config["use_depth"])
         self.depth_min_m = float(variant_config.get("depth_min_m", 0.1))
         self.depth_max_m = float(variant_config.get("depth_max_m", 10.0))
+        augmentation = dict(augmentation_config or {})
+        self.horizontal_flip_probability = float(
+            augmentation.get("horizontal_flip_probability", 0.0)
+        )
+        self.depth_scale_jitter = float(
+            augmentation.get("depth_scale_jitter", 0.0)
+        )
+        color_jitter = augmentation.get("color_jitter", {})
+        self.rgb_augmentation = transforms.Compose(
+            [
+                transforms.ColorJitter(
+                    brightness=float(color_jitter.get("brightness", 0.0)),
+                    contrast=float(color_jitter.get("contrast", 0.0)),
+                    saturation=float(color_jitter.get("saturation", 0.0)),
+                    hue=float(color_jitter.get("hue", 0.0)),
+                ),
+                transforms.RandomGrayscale(
+                    p=float(augmentation.get("grayscale_probability", 0.0))
+                ),
+                transforms.RandomApply(
+                    [transforms.GaussianBlur(kernel_size=3)],
+                    p=float(augmentation.get("blur_probability", 0.0)),
+                ),
+            ]
+        )
         self.transform = transforms.Compose(
             [
                 transforms.ToTensor(),
@@ -185,16 +222,19 @@ class CorridorMultiInputDataset(Dataset):
         self.sequences = []
         for session_samples in sessions.values():
             session_samples.sort(key=lambda sample: sample.stamp)
-            for end in range(self.sequence_length - 1, len(session_samples)):
-                sequence = session_samples[
-                    end - self.sequence_length + 1 : end + 1
-                ]
+            for end in range(
+                self.required_span - 1,
+                len(session_samples),
+                self.sequence_step,
+            ):
+                window = session_samples[end - self.required_span + 1 : end + 1]
                 if any(
                     later.stamp - earlier.stamp > self.maximum_gap_seconds
                     or later.stamp < earlier.stamp
-                    for earlier, later in zip(sequence, sequence[1:])
+                    for earlier, later in zip(window, window[1:])
                 ):
                     continue
+                sequence = window[:: self.frame_stride]
                 if self.use_depth and any(
                     sample.depth_path is None for sample in sequence
                 ):
@@ -204,7 +244,8 @@ class CorridorMultiInputDataset(Dataset):
             requirement = " with depth maps" if self.use_depth else ""
             raise ValueError(
                 "dataset contains no valid sequences"
-                f" of length {self.sequence_length}{requirement}"
+                f" of length {self.sequence_length}, frame stride "
+                f"{self.frame_stride}{requirement}"
             )
 
     def __len__(self):
@@ -219,10 +260,11 @@ class CorridorMultiInputDataset(Dataset):
                     f"dataset image must be {expected}, got {image.size}: "
                     f"{sample.image_path}"
                 )
-            return self.transform(image)
+            return self.transform(self.rgb_augmentation(image))
 
     def __getitem__(self, index):
         sequence = self.sequences[index]
+        flip = random.random() < self.horizontal_flip_probability
         inputs = {
             "rgb": torch.stack(
                 [self._load_rgb(sample) for sample in sequence]
@@ -232,11 +274,26 @@ class CorridorMultiInputDataset(Dataset):
             inputs["depth"] = torch.stack(
                 [
                     depth_to_tensor(
-                        np.load(sample.depth_path, allow_pickle=False),
+                        np.load(sample.depth_path, allow_pickle=False)
+                        * (
+                            random.uniform(
+                                1.0 - self.depth_scale_jitter,
+                                1.0 + self.depth_scale_jitter,
+                            )
+                            if self.depth_scale_jitter > 0.0
+                            else 1.0
+                        ),
                         self.depth_min_m,
                         self.depth_max_m,
                     )
                     for sample in sequence
                 ]
             )
-        return inputs, sequence[-1].class_index
+        label = sequence[-1].class_index
+        if flip:
+            inputs = {
+                key: torch.flip(value, dims=(-1,))
+                for key, value in inputs.items()
+            }
+            label = {2: 3, 3: 2, 5: 7, 7: 5}.get(label, label)
+        return inputs, label

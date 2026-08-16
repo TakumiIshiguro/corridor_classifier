@@ -1,6 +1,7 @@
 import csv
 import os
 import random
+from collections import Counter
 from contextlib import nullcontext
 from math import cos, pi
 from typing import Dict, Sequence
@@ -19,6 +20,54 @@ def set_random_seed(seed: int) -> None:
     torch.manual_seed(int(seed))
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(int(seed))
+
+
+def class_weights_from_counts(
+    counts: Sequence[int],
+    method: str = "none",
+    maximum_weight: float = 4.0,
+) -> torch.Tensor:
+    method = str(method).strip().lower()
+    values = torch.as_tensor(counts, dtype=torch.float32)
+    positive = values > 0
+    weights = torch.zeros_like(values)
+    if method == "none":
+        weights[positive] = 1.0
+        return weights
+    if method != "inverse_sqrt":
+        raise ValueError("class weighting must be none or inverse_sqrt")
+    if positive.any():
+        weights[positive] = torch.sqrt(values[positive].max() / values[positive])
+        weights.clamp_(max=float(maximum_weight))
+        weights[positive] /= weights[positive].mean()
+    return weights
+
+
+def sequence_sampling_weights(
+    labels: Sequence[int],
+    sessions: Sequence[str],
+    maximum_class_factor: float = 4.0,
+    maximum_session_factor: float = 4.0,
+) -> torch.Tensor:
+    if len(labels) != len(sessions) or not labels:
+        raise ValueError("labels and sessions must have the same non-zero length")
+    label_counts = Counter(int(label) for label in labels)
+    session_counts = Counter(str(session) for session in sessions)
+    largest_class = max(label_counts.values())
+    largest_session = max(session_counts.values())
+    weights = []
+    for label, session in zip(labels, sessions):
+        class_factor = min(
+            (largest_class / label_counts[int(label)]) ** 0.5,
+            float(maximum_class_factor),
+        )
+        session_factor = min(
+            (largest_session / session_counts[str(session)]) ** 0.5,
+            float(maximum_session_factor),
+        )
+        weights.append(class_factor * session_factor)
+    result = torch.tensor(weights, dtype=torch.double)
+    return result / result.mean()
 
 
 def last_blocks_for_epoch(
@@ -344,6 +393,7 @@ def save_checkpoint(
                 key: model_config[key]
                 for key in (
                     "sequence_length",
+                    "frame_stride",
                     "maximum_gap_seconds",
                     "use_depth",
                     "use_gru",

@@ -11,6 +11,19 @@ collection:
   image_format: jpg
   jpeg_quality: 95
 
+turn_detection:
+  enabled: true
+  source_num_classes: 8
+  class_name: turning
+  pose_topic: /mcl_pose
+  angular_speed_threshold_rad_s: 0.20
+  window_seconds: 1.0
+  minimum_duration_seconds: 0.5
+  padding_seconds: 0.25
+  maximum_pose_gap_seconds: 0.5
+  post_turn_next_label_max_seconds: 6.0
+  turning_gap_bridge_max_seconds: 1.5
+
 depth_generation:
   # Empty selects every session in dataset_types.
   dataset_types: [train]

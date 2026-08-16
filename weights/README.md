@@ -15,7 +15,7 @@ non-register weights.
 
 ## Trained corridor classifier
 
-Training writes the best eight-class checkpoint to:
+Training writes the best configured-class checkpoint to:
 
 ```text
 weights/corridor_classifier.pth

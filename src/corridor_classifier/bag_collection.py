@@ -1,4 +1,4 @@
-from typing import Iterable, Iterator, Optional, Tuple
+from typing import Callable, Iterable, Iterator, Optional, Tuple
 
 from corridor_classifier.collection import class_index_from_one_hot
 
@@ -26,6 +26,7 @@ def iter_labeled_images(
     num_classes: int,
     sample_dt: float,
     label_timeout: float,
+    class_index_override: Optional[Callable[[float, int], int]] = None,
 ) -> Iterator[Tuple[object, int, float]]:
     """Yield bag images paired with the latest valid preceding label.
 
@@ -56,5 +57,10 @@ def iter_labeled_images(
         if event_time - last_saved_at < sample_dt:
             continue
 
-        yield msg, current_class, image_stamp(msg, bag_time)
+        class_index = (
+            class_index_override(event_time, current_class)
+            if class_index_override is not None
+            else current_class
+        )
+        yield msg, class_index, image_stamp(msg, bag_time)
         last_saved_at = event_time

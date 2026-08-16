@@ -83,3 +83,25 @@ def test_invalid_label_clears_previous_label():
 
 def test_image_stamp_falls_back_to_bag_time():
     assert image_stamp(make_image(0.0), FakeTime(9.5)) == 9.5
+
+
+def test_bag_class_override_can_assign_turning_label():
+    image = make_image(11.0)
+    messages = [
+        ("/label", make_label(3), FakeTime(1.0)),
+        ("/image", image, FakeTime(1.1)),
+    ]
+
+    samples = list(
+        iter_labeled_images(
+            messages,
+            image_topic="/image",
+            label_topic="/label",
+            num_classes=8,
+            sample_dt=0.25,
+            label_timeout=0.5,
+            class_index_override=lambda stamp, source_class: 8,
+        )
+    )
+
+    assert samples == [(image, 8, 11.0)]

@@ -1,14 +1,14 @@
 # corridor_classifier
 
 ROS Noetic用の、DINOv2による単眼カメラ画像の通路形状分類パッケージです。
-カメラ画像を8クラスへ分類し、既存の`intersection_detector`と互換性の
+カメラ画像を8種類の通路形状と旋回中の計9クラスへ分類し、既存の`intersection_detector`と互換性の
 あるメッセージをpublishします。
 
 ## Model
 
 - Backbone: DINOv2 ViT-S/14 (`vit_small_patch14_dinov2.lvd142m`)
 - Input: RGB and optional UniDepth metric depth, 224 x 224
-- Output: 8-class logits
+- Output: 9-class logits
 - Default inference rate: 4 Hz
 
 クラスの順序は次のとおりです。
@@ -21,6 +21,7 @@ ROS Noetic用の、DINOv2による単眼カメラ画像の通路形状分類パ�
 6. `3_way_right`
 7. `3_way_center`
 8. `3_way_left`
+9. `turning`
 
 入力画像はカメラの視野全体を残すため、アスペクト比を維持せず224 x 224へ
 リサイズします。学習時も同じ前処理を使用してください。
@@ -53,7 +54,9 @@ ROS Noetic用の、DINOv2による単眼カメラ画像の通路形状分類パ�
 | `/corridor_classifier/probabilities` | `std_msgs/Float32MultiArray` | Probabilities in configured class order |
 
 `/passage_type`では、`intersection_name`にクラス名、
-`intersection_label`に8要素のone-hotベクトルを設定します。分類ノードは
+`intersection_label`は既存メッセージとの互換性のため8要素のままです。通路形状
+クラスでは従来のone-hotを設定し、`turning`では全要素を0にして
+`intersection_name=turning`を設定します。分類ノードは
 方向指令を生成しないため、`cmd_dir`は常に`[0, 0, 0]`です。
 
 トピック名は`config/topics.yaml`で変更できます。
@@ -82,7 +85,7 @@ weights/dinov2_vits14_pretrain.pth
 
 既定設定はレジスタなしモデルを使用します。`reg4`重みは使用しません。
 
-学習後の8クラスcheckpointは次の場所に保存され、ROSノードも同じファイルを
+学習後の9クラスcheckpointは次の場所に保存され、ROSノードも同じファイルを
 読み込みます。
 
 ```text
@@ -113,8 +116,9 @@ checkpointのモデル名、入力サイズ、分類ヘッド、クラス順序�
 
 `waypoint_navigator_with_direction_intersection_detailed`がpublishする
 `/cmd_dir_intersection`の8要素one-hotラベルとカメラ画像を保存します。
-`intersection_name`は使用しません。全要素0、複数要素1、8要素以外のラベルは
-保存しません。
+元メッセージの`intersection_name`は使用しません。全要素0、複数要素1、8要素
+以外の元ラベルは保存しません。bag収集では`/mcl_pose`からyaw角速度を求め、
+旋回中の画像だけ9番目の`turning`へ置換します。
 
 入力方法と使用するbagは`config/dataset.yaml`で指定します。bagファイルは
 絶対パス、または`corridor_classifier`パッケージからの相対パスを使用できます。
@@ -126,10 +130,34 @@ collection:
 ```
 
 bagには`config/topics.yaml`で指定した画像トピックとラベルトピックの両方が
-必要です。メッセージをbag記録時刻順に読み、各画像より前に届いた最新の有効な
+必要です。旋回判定を有効にした場合は`turn_detection.pose_topic`も必要です。
+メッセージをbag記録時刻順に読み、各画像より前に届いた最新の有効な
 one-hotラベルを使用します。ラベルが`label_timeout`より古い画像は保存せず、
 `sample_dt`間隔で画像を間引きます。画像のROS header stampが有効な場合は、
 その時刻を`samples.csv`へ記録します。
+
+旋回判定の既定値は、中央1秒窓のyaw角速度が`0.20 rad/s`以上で0.5秒以上
+継続する区間です。前後0.25秒も`turning`へ含めます。
+
+```yaml
+turn_detection:
+  enabled: true
+  source_num_classes: 8
+  class_name: turning
+  pose_topic: /mcl_pose
+  angular_speed_threshold_rad_s: 0.20
+  window_seconds: 1.0
+  minimum_duration_seconds: 0.5
+  padding_seconds: 0.25
+  post_turn_next_label_max_seconds: 6.0
+  turning_gap_bridge_max_seconds: 1.5
+```
+
+`A -> turning -> A -> B`のように旋回後も旧ラベル`A`が短時間残る場合、
+後段の`A`が6秒以内なら次ラベル`B`へ置換します。旋回終了後の直線画像を
+`turning`へ延長せず、次の通路形状へ揃えるためのbag専用後処理です。
+また、`turning -> A -> turning`の間にある`A`が1.5秒以内なら、旋回中の
+一時的な直進とみなして`turning`へ統合します。
 
 設定後は引数なしで起動します。
 
@@ -138,7 +166,8 @@ roslaunch corridor_classifier create_dataset.launch
 ```
 
 ライブトピックから収集するときは`source: live`に変更します。その場合、
-`bag_path`は使用されません。
+`bag_path`は使用されません。中央時間窓を必要とする旋回判定はbag専用なので、
+ライブ収集では`turn_detection.enabled: false`にしてください。
 
 画像は収集時に視野全体を224 x 224へリサイズして保存します。保存間隔、
 ラベルtimeout、出力先は`config/dataset.yaml`で設定します。
@@ -163,6 +192,17 @@ roslaunch corridor_classifier create_dataset.launch \
 trainとtestは`config/training.yaml`の`train_data_dir`と`test_data_dir`で
 別々に指定します。testを使用する場合は`training.use_test: true`にします。
 `use_test: false`ではtestデータを読み込まず、trainデータだけで学習します。
+
+既存の画像とdepthを再利用して旋回ラベル版を作る場合は、次を実行します。
+出力側の`images/`と`depth/`は元データへの相対シンボリックリンクになるため、
+画像や深度を複製しません。
+
+```bash
+rosrun corridor_classifier relabel_turning.py \
+  --source-dir dataset/corridor/bags_all_train/train \
+  --output-dir dataset/corridor/bags_turning/train \
+  --config-dir config
+```
 
 Depthモデルを学習する前に、各sessionの`metadata.yaml`に記録された元bagを
 UniDepthで再処理し、対応するメートル深度を追加します。
@@ -193,7 +233,7 @@ rosrun corridor_classifier train.py \
   --config-dir "$(rospack find corridor_classifier)/config"
 ```
 
-現在の既定設定では、10 epochすべてbackboneを固定して8クラス分類headだけを
+現在の既定設定では、10 epochすべてbackboneを固定して9クラス分類headだけを
 学習します。段階的にunfreezeする場合は`unfreeze_schedule`へepochと
 `last_blocks`を追加します。
 

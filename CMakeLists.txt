@@ -26,6 +26,7 @@ catkin_install_python(PROGRAMS
   scripts/add_depth_to_dataset.py
   scripts/create_dataset.py
   scripts/corridor_classifier_node.py
+  scripts/relabel_turning.py
   scripts/train.py
   scripts/visualize_features.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}

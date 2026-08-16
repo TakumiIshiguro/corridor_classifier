@@ -27,3 +27,9 @@ def test_passage_message_rejects_invalid_index():
     with pytest.raises(ValueError, match="class_index"):
         make_passage_message(8, CLASS_NAMES)
 
+
+def test_turning_message_uses_name_with_legacy_all_zero_one_hot():
+    msg = make_passage_message(8, CLASS_NAMES + ("turning",))
+
+    assert list(msg.intersection_label) == [0] * 8
+    assert msg.intersection_name == "turning"

@@ -4,7 +4,7 @@ model:
   # DINOv2 ViT-S/14 is the smallest official DINOv2 backbone.
   model_name: vit_small_patch14_dinov2.lvd142m
   input_size: [224, 224]
-  num_classes: 8
+  num_classes: 9
   class_names:
     - straight_road
     - dead_end
@@ -14,6 +14,7 @@ model:
     - 3_way_right
     - 3_way_center
     - 3_way_left
+    - turning
   device: auto
   use_fp16: true
   strict_checkpoint: true

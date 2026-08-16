@@ -1,6 +1,8 @@
 <?xml version="1.0"?>
 <launch>
   <arg name="config_dir" default="$(find corridor_classifier)/config"/>
+  <arg name="dataset_dir_override" default=""/>
+  <arg name="bag_path_override" default=""/>
   <arg name="dataset_type_override" default=""/>
   <arg name="session_name_override" default=""/>
 
@@ -11,6 +13,8 @@
     output="screen"
     required="true">
     <param name="config_dir" value="$(arg config_dir)"/>
+    <param name="dataset_dir_override" value="$(arg dataset_dir_override)"/>
+    <param name="bag_path_override" value="$(arg bag_path_override)"/>
     <param name="dataset_type_override" value="$(arg dataset_type_override)"/>
     <param name="session_name_override" value="$(arg session_name_override)"/>
   </node>

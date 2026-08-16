@@ -14,16 +14,18 @@ from corridor_classifier.config import (
 )
 
 
-def test_default_config_has_eight_unique_classes():
+def test_default_config_has_nine_unique_classes_including_turning():
     config = load_config(os.path.join(package_root(), "config"))
 
     assert config["model"]["model_name"] == "vit_small_patch14_dinov2.lvd142m"
     assert config["model"]["architecture"] == "rgb_gru"
     assert config["model"]["use_depth"] is False
     assert config["model"]["use_gru"] is True
+    assert config["model"]["frame_stride"] == 1
     assert config["model"]["input_size"] == [224, 224]
-    assert config["model"]["num_classes"] == 8
-    assert len(set(config["model"]["class_names"])) == 8
+    assert config["model"]["num_classes"] == 9
+    assert len(set(config["model"]["class_names"])) == 9
+    assert config["model"]["class_names"][-1] == "turning"
     assert config["runtime"] == {"inference_rate": 4.0}
     assert config["topics"]["image_topic"] == "/camera_center/image_raw"
     assert config["topics"]["label_topic"] == "/cmd_dir_intersection"
@@ -71,6 +73,14 @@ def test_collection_and_training_configs_match_model_input():
     assert collection["collection"]["source"] == "bag"
     assert collection["collection"]["bag_path"].endswith(".bag")
     assert collection["collection"]["sample_dt"] == 0.25
+    assert collection["turn_detection"]["enabled"] is True
+    assert collection["turn_detection"]["source_num_classes"] == 8
+    assert collection["turn_detection"]["class_index"] == 8
+    assert (
+        collection["turn_detection"]["post_turn_next_label_max_seconds"]
+        == 6.0
+    )
+    assert collection["turn_detection"]["turning_gap_bridge_max_seconds"] == 1.5
     assert training["dataset"]["train_data_dir"]
     assert training["dataset"]["train_session_names"] == [
         "session_20260811_010115"
@@ -120,3 +130,4 @@ def test_all_architecture_configs_are_valid(
     assert config["model"]["use_depth"] is use_depth
     assert config["model"]["use_gru"] is use_gru
     assert config["model"]["sequence_length"] == sequence_length
+    assert config["model"]["frame_stride"] == 1

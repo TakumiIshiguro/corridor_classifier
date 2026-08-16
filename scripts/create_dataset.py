@@ -13,8 +13,10 @@ from PIL import Image as PILImage
 from scenario_navigation_msgs.msg import cmd_dir_intersection
 
 from corridor_classifier.collection import (
+    bridge_turning_gaps_in_session,
     DatasetSessionWriter,
     class_index_from_one_hot,
+    replace_post_turn_labels_in_session,
 )
 from corridor_classifier.bag_collection import iter_labeled_images
 from corridor_classifier.config import (
@@ -23,6 +25,7 @@ from corridor_classifier.config import (
     resolve_path,
 )
 from corridor_classifier.image_subscriber import LatestImageSubscriber
+from corridor_classifier.turn_detection import detector_from_pose_messages
 
 
 class LatestLabel:
@@ -52,6 +55,16 @@ class LatestLabel:
 
 def _apply_overrides(config):
     collection = config["collection"]
+    dataset_dir = str(
+        rospy.get_param("~dataset_dir_override", "")
+    ).strip()
+    if dataset_dir:
+        config["paths"]["dataset_dir"] = dataset_dir
+
+    bag_path = str(rospy.get_param("~bag_path_override", "")).strip()
+    if bag_path:
+        collection["bag_path"] = bag_path
+
     dataset_type = str(
         rospy.get_param("~dataset_type_override", "")
     ).strip()
@@ -77,11 +90,11 @@ def _bag_topics(bag):
     return set(topics.keys())
 
 
-def _validate_bag_topics(bag, image_topic, label_topic):
+def _validate_bag_topics(bag, image_topic, label_topic, additional_topics=()):
     available_topics = _bag_topics(bag)
     missing_topics = [
         topic
-        for topic in (image_topic, label_topic)
+        for topic in (image_topic, label_topic, *additional_topics)
         if topic not in available_topics
     ]
     if missing_topics:
@@ -92,8 +105,14 @@ def _validate_bag_topics(bag, image_topic, label_topic):
 
 
 def _collect_live(writer, model, topics, collection, bridge):
+    if collection["turn_detection"]["enabled"]:
+        raise ValueError(
+            "centered-window turn detection currently requires collection.source=bag"
+        )
     image_subscriber = LatestImageSubscriber(topics["image_topic"])
-    latest_label = LatestLabel(model["num_classes"])
+    latest_label = LatestLabel(
+        collection["turn_detection"]["source_num_classes"]
+    )
     label_subscriber = rospy.Subscriber(
         topics["label_topic"],
         cmd_dir_intersection,
@@ -158,16 +177,58 @@ def _collect_live(writer, model, topics, collection, bridge):
 def _collect_bag(writer, bag_path, model, topics, collection, bridge):
     image_topic = topics["image_topic"]
     label_topic = topics["label_topic"]
+    turn_detection = collection["turn_detection"]
     with rosbag.Bag(bag_path, "r") as bag:
-        _validate_bag_topics(bag, image_topic, label_topic)
+        extra_topics = (
+            [turn_detection["pose_topic"]]
+            if turn_detection["enabled"]
+            else []
+        )
+        _validate_bag_topics(
+            bag,
+            image_topic,
+            label_topic,
+            additional_topics=extra_topics,
+        )
+        turning_detector = None
+        if turn_detection["enabled"]:
+            turning_detector = detector_from_pose_messages(
+                bag.read_messages(topics=[turn_detection["pose_topic"]]),
+                angular_speed_threshold_rad_s=turn_detection[
+                    "angular_speed_threshold_rad_s"
+                ],
+                window_seconds=turn_detection["window_seconds"],
+                minimum_duration_seconds=turn_detection[
+                    "minimum_duration_seconds"
+                ],
+                padding_seconds=turn_detection["padding_seconds"],
+                maximum_pose_gap_seconds=turn_detection[
+                    "maximum_pose_gap_seconds"
+                ],
+            )
+            rospy.loginfo(
+                "detected %d turning intervals from %s",
+                len(turning_detector.intervals),
+                turn_detection["pose_topic"],
+            )
         messages = bag.read_messages(topics=[image_topic, label_topic])
+        class_index_override = None
+        if turning_detector is not None:
+            turn_class_index = int(turn_detection["class_index"])
+
+            def class_index_override(event_time, source_class_index):
+                if turning_detector.is_turning(event_time):
+                    return turn_class_index
+                return source_class_index
+
         samples = iter_labeled_images(
             messages=messages,
             image_topic=image_topic,
             label_topic=label_topic,
-            num_classes=model["num_classes"],
+            num_classes=turn_detection["source_num_classes"],
             sample_dt=float(collection["sample_dt"]),
             label_timeout=float(collection["label_timeout"]),
+            class_index_override=class_index_override,
         )
         for image_msg, class_index, stamp in samples:
             if rospy.is_shutdown():
@@ -202,6 +263,7 @@ def main():
     model = config["model"]
     topics = config["topics"]
     collection = config["collection"]
+    collection["turn_detection"] = config["turn_detection"]
     dataset_root = resolve_path(config["paths"]["dataset_dir"], package_root())
     bag_path = ""
     if collection["source"] == "bag":
@@ -213,6 +275,11 @@ def main():
                 bag,
                 topics["image_topic"],
                 topics["label_topic"],
+                additional_topics=(
+                    [config["turn_detection"]["pose_topic"]]
+                    if config["turn_detection"]["enabled"]
+                    else []
+                ),
             )
 
     session_name = collection["session_name"]
@@ -239,6 +306,7 @@ def main():
             "label_topic": topics["label_topic"],
             "sample_dt": collection["sample_dt"],
             "label_timeout": collection["label_timeout"],
+            "turn_detection": config["turn_detection"],
         },
     )
     rospy.on_shutdown(writer.close)
@@ -268,6 +336,29 @@ def main():
             _collect_live(writer, model, topics, collection, bridge)
     finally:
         writer.close()
+
+    if collection["source"] == "bag" and config["turn_detection"]["enabled"]:
+        turn_config = config["turn_detection"]
+        bridged = bridge_turning_gaps_in_session(
+            session_dir=session_dir,
+            class_names=model["class_names"],
+            turn_class_index=turn_config["class_index"],
+            maximum_seconds=turn_config["turning_gap_bridge_max_seconds"],
+        )
+        changed = replace_post_turn_labels_in_session(
+            session_dir=session_dir,
+            class_names=model["class_names"],
+            turn_class_index=turn_config["class_index"],
+            maximum_seconds=turn_config[
+                "post_turn_next_label_max_seconds"
+            ],
+        )
+        rospy.loginfo(
+            "bridged %d short turning-gap sample(s); replaced %d short "
+            "post-turn stale-label sample(s) with the following label",
+            bridged,
+            changed,
+        )
 
     rospy.loginfo(
         "dataset collection finished: %d samples in %s",

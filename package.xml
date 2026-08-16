@@ -2,7 +2,7 @@
 <package format="2">
   <name>corridor_classifier</name>
   <version>0.1.0</version>
-  <description>DINOv2-based eight-class corridor shape classifier for ROS.</description>
+  <description>DINOv2-based corridor shape and turning-state classifier for ROS.</description>
 
   <maintainer email="takumi@example.com">takumi</maintainer>
   <license>MIT</license>

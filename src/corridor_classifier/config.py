@@ -87,6 +87,9 @@ def _validate_config(config: Dict[str, Any]) -> None:
     model["sequence_length"] = int(model.get("sequence_length", 1))
     if model["sequence_length"] <= 0:
         raise ValueError("model.sequence_length must be positive")
+    model["frame_stride"] = int(model.get("frame_stride", 1))
+    if model["frame_stride"] <= 0:
+        raise ValueError("model.frame_stride must be positive")
     model["use_depth"] = bool(model.get("use_depth", False))
     model["use_gru"] = bool(model.get("use_gru", False))
     if model["use_gru"] != architecture.endswith("gru"):
@@ -95,6 +98,8 @@ def _validate_config(config: Dict[str, Any]) -> None:
         raise ValueError("model use_depth does not match architecture")
     if not model["use_gru"] and model["sequence_length"] != 1:
         raise ValueError("non-GRU architectures require sequence_length=1")
+    if not model["use_gru"] and model["frame_stride"] != 1:
+        raise ValueError("non-GRU architectures require frame_stride=1")
     model["maximum_gap_seconds"] = float(
         model.get("maximum_gap_seconds", 0.4)
     )
@@ -169,6 +174,7 @@ def load_collection_config(config_dir: str = None) -> Dict[str, Any]:
     paths = dict(dataset_data.get("paths", {}))
     collection = dict(dataset_data.get("collection", {}))
     depth_generation = dict(dataset_data.get("depth_generation", {}))
+    turn_detection = dict(dataset_data.get("turn_detection", {}))
     if not paths.get("dataset_dir"):
         raise ValueError("dataset.yaml must define paths.dataset_dir")
     if not config["topics"].get("label_topic"):
@@ -241,9 +247,75 @@ def load_collection_config(config_dir: str = None) -> Dict[str, Any]:
             "stamp_tolerance_seconds": stamp_tolerance,
         }
     )
+    turn_enabled = bool(turn_detection.get("enabled", False))
+    source_num_classes = int(
+        turn_detection.get("source_num_classes", config["model"]["num_classes"])
+    )
+    turn_class_name = str(
+        turn_detection.get("class_name", "turning")
+    ).strip()
+    pose_topic = str(turn_detection.get("pose_topic", "/mcl_pose")).strip()
+    if source_num_classes <= 0 or source_num_classes > config["model"]["num_classes"]:
+        raise ValueError("turn_detection.source_num_classes is invalid")
+    if turn_enabled and turn_class_name not in config["model"]["class_names"]:
+        raise ValueError("turn_detection.class_name must exist in model.class_names")
+    if turn_enabled and not pose_topic:
+        raise ValueError("turn_detection.pose_topic must not be empty")
+    threshold = float(
+        turn_detection.get("angular_speed_threshold_rad_s", 0.20)
+    )
+    window_seconds = float(turn_detection.get("window_seconds", 1.0))
+    minimum_duration = float(
+        turn_detection.get("minimum_duration_seconds", 0.5)
+    )
+    padding_seconds = float(turn_detection.get("padding_seconds", 0.25))
+    maximum_pose_gap = float(
+        turn_detection.get("maximum_pose_gap_seconds", 0.5)
+    )
+    post_turn_maximum = float(
+        turn_detection.get("post_turn_next_label_max_seconds", 6.0)
+    )
+    turning_gap_maximum = float(
+        turn_detection.get("turning_gap_bridge_max_seconds", 1.5)
+    )
+    if threshold <= 0.0 or window_seconds <= 0.0 or maximum_pose_gap <= 0.0:
+        raise ValueError(
+            "turn detection threshold, window, and pose gap must be positive"
+        )
+    if minimum_duration < 0.0 or padding_seconds < 0.0:
+        raise ValueError("turn detection duration and padding must be non-negative")
+    if post_turn_maximum < 0.0:
+        raise ValueError(
+            "turn_detection.post_turn_next_label_max_seconds must be non-negative"
+        )
+    if turning_gap_maximum < 0.0:
+        raise ValueError(
+            "turn_detection.turning_gap_bridge_max_seconds must be non-negative"
+        )
+    turn_detection.update(
+        {
+            "enabled": turn_enabled,
+            "source_num_classes": source_num_classes,
+            "class_name": turn_class_name,
+            "class_index": (
+                config["model"]["class_names"].index(turn_class_name)
+                if turn_enabled
+                else None
+            ),
+            "pose_topic": pose_topic,
+            "angular_speed_threshold_rad_s": threshold,
+            "window_seconds": window_seconds,
+            "minimum_duration_seconds": minimum_duration,
+            "padding_seconds": padding_seconds,
+            "maximum_pose_gap_seconds": maximum_pose_gap,
+            "post_turn_next_label_max_seconds": post_turn_maximum,
+            "turning_gap_bridge_max_seconds": turning_gap_maximum,
+        }
+    )
     config["paths"] = paths
     config["collection"] = collection
     config["depth_generation"] = depth_generation
+    config["turn_detection"] = turn_detection
     return config
 
 

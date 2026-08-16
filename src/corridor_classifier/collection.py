@@ -6,6 +6,11 @@ from typing import Optional, Sequence
 import yaml
 from PIL import Image
 
+from corridor_classifier.turn_detection import (
+    bridge_short_turning_gaps,
+    replace_post_turn_label_islands,
+)
+
 
 def class_index_from_one_hot(
     values: Sequence[int],
@@ -118,3 +123,116 @@ class DatasetSessionWriter:
         self._manifest.close()
         self._closed = True
 
+
+def replace_post_turn_labels_in_session(
+    session_dir: str,
+    class_names: Sequence[str],
+    turn_class_index: int,
+    maximum_seconds: float,
+) -> int:
+    """Refine a completed manifest and update its class-count metadata."""
+    session_dir = os.path.abspath(session_dir)
+    manifest_path = os.path.join(session_dir, "samples.csv")
+    with open(manifest_path, "r", newline="") as stream:
+        reader = csv.DictReader(stream)
+        fieldnames = list(reader.fieldnames or [])
+        rows = list(reader)
+    required = {"stamp", "class_index", "class_name"}
+    if not required.issubset(fieldnames):
+        raise ValueError(
+            f"manifest is missing required columns {sorted(required)}: "
+            f"{manifest_path}"
+        )
+
+    original = [int(row["class_index"]) for row in rows]
+    refined = replace_post_turn_label_islands(
+        stamps=[float(row["stamp"]) for row in rows],
+        labels=original,
+        turn_class_index=turn_class_index,
+        maximum_seconds=maximum_seconds,
+    )
+    changed = sum(before != after for before, after in zip(original, refined))
+    counts = Counter()
+    for row, class_index in zip(rows, refined):
+        row["class_index"] = str(class_index)
+        row["class_name"] = str(class_names[class_index])
+        counts[class_index] += 1
+
+    temporary = manifest_path + ".tmp"
+    with open(temporary, "w", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    os.replace(temporary, manifest_path)
+
+    metadata_path = os.path.join(session_dir, "metadata.yaml")
+    with open(metadata_path, "r") as stream:
+        metadata = yaml.safe_load(stream) or {}
+    metadata["class_counts"] = {
+        str(name): int(counts.get(index, 0))
+        for index, name in enumerate(class_names)
+    }
+    metadata["post_turn_next_label"] = {
+        "maximum_seconds": float(maximum_seconds),
+        "changed_samples": int(changed),
+    }
+    with open(metadata_path, "w") as stream:
+        yaml.safe_dump(metadata, stream, sort_keys=False)
+    return int(changed)
+
+
+def bridge_turning_gaps_in_session(
+    session_dir: str,
+    class_names: Sequence[str],
+    turn_class_index: int,
+    maximum_seconds: float,
+) -> int:
+    """Bridge short turning gaps and update manifest metadata counts."""
+    session_dir = os.path.abspath(session_dir)
+    manifest_path = os.path.join(session_dir, "samples.csv")
+    with open(manifest_path, "r", newline="") as stream:
+        reader = csv.DictReader(stream)
+        fieldnames = list(reader.fieldnames or [])
+        rows = list(reader)
+    required = {"stamp", "class_index", "class_name"}
+    if not required.issubset(fieldnames):
+        raise ValueError(
+            f"manifest is missing required columns {sorted(required)}: "
+            f"{manifest_path}"
+        )
+
+    original = [int(row["class_index"]) for row in rows]
+    refined = bridge_short_turning_gaps(
+        stamps=[float(row["stamp"]) for row in rows],
+        labels=original,
+        turn_class_index=turn_class_index,
+        maximum_seconds=maximum_seconds,
+    )
+    changed = sum(before != after for before, after in zip(original, refined))
+    counts = Counter()
+    for row, class_index in zip(rows, refined):
+        row["class_index"] = str(class_index)
+        row["class_name"] = str(class_names[class_index])
+        counts[class_index] += 1
+
+    temporary = manifest_path + ".tmp"
+    with open(temporary, "w", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    os.replace(temporary, manifest_path)
+
+    metadata_path = os.path.join(session_dir, "metadata.yaml")
+    with open(metadata_path, "r") as stream:
+        metadata = yaml.safe_load(stream) or {}
+    metadata["class_counts"] = {
+        str(name): int(counts.get(index, 0))
+        for index, name in enumerate(class_names)
+    }
+    metadata["turning_gap_bridge"] = {
+        "maximum_seconds": float(maximum_seconds),
+        "changed_samples": int(changed),
+    }
+    with open(metadata_path, "w") as stream:
+        yaml.safe_dump(metadata, stream, sort_keys=False)
+    return int(changed)

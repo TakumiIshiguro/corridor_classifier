@@ -1,0 +1,31 @@
+dataset:
+  train_data_dir: dataset/corridor/bags_all_train/train
+  train_session_names: [a_f, g, h]
+  test_data_dir: dataset/corridor/bags_i_n_test/test
+  test_session_names: [i, j, k, l, m, n]
+  num_workers: 4
+
+training:
+  epochs: 12
+  batch_size: 8
+  use_test: true
+  use_amp: true
+  seed: 0
+  freeze_backbone_epochs: 12
+  unfreeze_schedule: []
+  pretrained_weights_path: weights/dinov2_vits14_pretrain.pth
+  run_root: runs/experiments/rgb_depth_gru_bags/baseline
+
+optimizer:
+  name: adamw
+  head_learning_rate: 0.0005
+  backbone_learning_rate: 0.00001
+  weight_decay: 0.0001
+  betas: [0.9, 0.999]
+  epsilon: 1.0e-8
+
+scheduler:
+  name: cosine
+  warmup_epochs: 1
+  warmup_start_factor: 0.1
+  min_learning_rate_ratio: 0.05

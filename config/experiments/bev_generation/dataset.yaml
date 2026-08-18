@@ -1,0 +1,31 @@
+paths:
+  dataset_dir: dataset/corridor/bags_turning
+
+collection:
+  source: bag
+  bag_path: /home/takumi/bags/g.bag
+  dataset_type: train
+  session_name: ""
+  sample_dt: 0.25
+  label_timeout: 0.5
+  image_format: jpg
+  jpeg_quality: 95
+
+turn_detection:
+  enabled: true
+  source_num_classes: 8
+  class_name: turning
+  pose_topic: /mcl_pose
+  angular_speed_threshold_rad_s: 0.20
+  window_seconds: 1.0
+  minimum_duration_seconds: 0.5
+  padding_seconds: 0.25
+  maximum_pose_gap_seconds: 0.5
+  post_turn_next_label_max_seconds: 6.0
+  turning_gap_bridge_max_seconds: 1.5
+
+depth_generation:
+  dataset_types: [train, test]
+  session_names: []
+  unidepth_config_file: ../UniDepth/unidepth_ros/config/unidepth.yaml
+  stamp_tolerance_seconds: 0.01

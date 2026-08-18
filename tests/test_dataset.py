@@ -171,3 +171,35 @@ def test_horizontal_flip_remaps_directional_label(tmp_path):
     _, label = dataset[0]
 
     assert label == 3
+
+
+def test_passage_direction_targets_mask_turning_samples(tmp_path):
+    class_names = [
+        "straight_road",
+        "dead_end",
+        "corner_right",
+        "corner_left",
+        "cross_road",
+        "3_way_right",
+        "3_way_center",
+        "3_way_left",
+        "turning",
+    ]
+    image_path = tmp_path / "turning.png"
+    Image.new("RGB", (224, 224)).save(image_path)
+    dataset = CorridorMultiInputDataset(
+        [CorridorSample(str(image_path), 8, "session", stamp=1.0)],
+        [224, 224],
+        {
+            "sequence_length": 1,
+            "use_depth": False,
+            "output_mode": "passage_directions",
+            "class_names": class_names,
+            "turning_class_name": "turning",
+        },
+    )
+
+    _, target = dataset[0]
+
+    assert target["direction_mask"] == 0.0
+    assert target["turning"] == 1.0

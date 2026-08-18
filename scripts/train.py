@@ -22,14 +22,20 @@ from corridor_classifier.dataset import (
 )
 from corridor_classifier.dino_classifier import resolve_device
 from corridor_classifier.models import create_corridor_model
+from corridor_classifier.passage_directions import (
+    inverse_frequency_positive_weights,
+    passage_label_counts,
+)
 from corridor_classifier.training import (
     MetricsWriter,
+    PassageDirectionLoss,
     class_weights_from_counts,
     configure_trainable_layers,
     create_optimizer,
     create_scheduler,
     last_blocks_for_epoch,
     run_epoch,
+    run_passage_epoch,
     save_checkpoint,
     sequence_sampling_weights,
     set_random_seed,
@@ -163,13 +169,47 @@ def main():
         [sequence[-1] for sequence in train_dataset.sequences],
         model_config["num_classes"],
     )
-    class_weights = class_weights_from_counts(
-        train_sequence_counts,
-        method=training.get("class_weighting", "none"),
-        maximum_weight=float(training.get("maximum_class_weight", 4.0)),
-    ).to(device)
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
-    evaluation_criterion = nn.CrossEntropyLoss()
+    output_mode = str(model_config.get("output_mode", "class"))
+    passage_counts = None
+    if output_mode == "passage_directions":
+        passage_counts = passage_label_counts(
+            [sequence[-1].class_index for sequence in train_dataset.sequences],
+            model_config["class_names"],
+            model_config["turning_class_name"],
+        )
+        maximum_positive_weight = float(
+            training.get("maximum_positive_weight", 5.0)
+        )
+        direction_pos_weight = inverse_frequency_positive_weights(
+            passage_counts["direction_positive"],
+            passage_counts["direction_negative"],
+            maximum_positive_weight,
+        ).to(device)
+        turning_pos_weight = inverse_frequency_positive_weights(
+            [passage_counts["turning_positive"]],
+            [passage_counts["turning_negative"]],
+            maximum_positive_weight,
+        ).to(device)[0]
+        criterion = PassageDirectionLoss(
+            direction_pos_weight=direction_pos_weight,
+            turning_pos_weight=turning_pos_weight,
+            direction_loss_weight=float(
+                training.get("direction_loss_weight", 1.0)
+            ),
+            turning_loss_weight=float(
+                training.get("turning_loss_weight", 1.0)
+            ),
+        ).to(device)
+        evaluation_criterion = PassageDirectionLoss().to(device)
+        class_weights = None
+    else:
+        class_weights = class_weights_from_counts(
+            train_sequence_counts,
+            method=training.get("class_weighting", "none"),
+            maximum_weight=float(training.get("maximum_class_weight", 4.0)),
+        ).to(device)
+        criterion = nn.CrossEntropyLoss(weight=class_weights)
+        evaluation_criterion = nn.CrossEntropyLoss()
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
     output_checkpoint = resolve_path(
@@ -198,6 +238,7 @@ def main():
                 if use_test
                 else []
             ),
+            "train_passage_label_counts": passage_counts,
         },
         "training": training,
         "optimizer": optimizer_config,
@@ -220,7 +261,15 @@ def main():
         f"{effective_config['dataset']['train_class_counts']}"
     )
     print(f"train sequence class counts={train_sequence_counts}")
-    print(f"loss class weights={class_weights.cpu().tolist()}")
+    if output_mode == "passage_directions":
+        print(f"passage label counts={passage_counts}")
+        print(
+            "positive weights="
+            f"directions={direction_pos_weight.cpu().tolist()} "
+            f"turning={float(turning_pos_weight.cpu()):.4f}"
+        )
+    else:
+        print(f"loss class weights={class_weights.cpu().tolist()}")
     print(f"sampling strategy={sampling_strategy}")
     if use_test:
         print(
@@ -243,14 +292,29 @@ def main():
     checkpoint_metric = str(
         training.get(
             "checkpoint_metric",
-            "test_macro_f1" if use_test else "train_macro_f1",
+            (
+                "test_direction_macro_f1"
+                if use_test and output_mode == "passage_directions"
+                else "train_direction_macro_f1"
+                if output_mode == "passage_directions"
+                else "test_macro_f1"
+                if use_test
+                else "train_macro_f1"
+            ),
         )
     )
-    maximize_checkpoint_metric = checkpoint_metric.endswith("macro_f1")
+    maximize_checkpoint_metric = not checkpoint_metric.endswith("loss")
     best_monitored_value = (
         float("-inf") if maximize_checkpoint_metric else float("inf")
     )
-    metrics_writer = MetricsWriter(metrics_path)
+    metrics_writer = MetricsWriter(
+        metrics_path,
+        fields=(
+            MetricsWriter.PASSAGE_FIELDS
+            if output_mode == "passage_directions"
+            else MetricsWriter.CLASSIFICATION_FIELDS
+        ),
+    )
     try:
         current_last_blocks = None
         for epoch in range(1, training["epochs"] + 1):
@@ -271,27 +335,56 @@ def main():
                     f"{trainable_info['total_parameters']}"
                 )
 
-            train_metrics = run_epoch(
-                model=model,
-                loader=train_loader,
-                criterion=criterion,
-                device=device,
-                num_classes=model_config["num_classes"],
-                optimizer=optimizer,
-                scheduler=scheduler,
-                scaler=scaler,
-                use_amp=use_amp,
-                description=f"train {epoch}/{training['epochs']}",
-            )
-            test_metrics = (
-                run_epoch(
-                    model=model,
-                    loader=test_loader,
-                    criterion=evaluation_criterion,
-                    device=device,
+            common_train_arguments = {
+                "model": model,
+                "loader": train_loader,
+                "criterion": criterion,
+                "device": device,
+                "optimizer": optimizer,
+                "scheduler": scheduler,
+                "scaler": scaler,
+                "use_amp": use_amp,
+                "description": f"train {epoch}/{training['epochs']}",
+            }
+            if output_mode == "passage_directions":
+                train_metrics = run_passage_epoch(
+                    direction_thresholds=model_config[
+                        "direction_thresholds"
+                    ],
+                    turning_threshold=model_config["turning_threshold"],
+                    **common_train_arguments,
+                )
+            else:
+                train_metrics = run_epoch(
                     num_classes=model_config["num_classes"],
-                    use_amp=use_amp,
-                    description=f"test {epoch}/{training['epochs']}",
+                    **common_train_arguments,
+                )
+            test_metrics = (
+                (
+                    run_passage_epoch(
+                        model=model,
+                        loader=test_loader,
+                        criterion=evaluation_criterion,
+                        device=device,
+                        direction_thresholds=model_config[
+                            "direction_thresholds"
+                        ],
+                        turning_threshold=model_config[
+                            "turning_threshold"
+                        ],
+                        use_amp=use_amp,
+                        description=f"test {epoch}/{training['epochs']}",
+                    )
+                    if output_mode == "passage_directions"
+                    else run_epoch(
+                        model=model,
+                        loader=test_loader,
+                        criterion=evaluation_criterion,
+                        device=device,
+                        num_classes=model_config["num_classes"],
+                        use_amp=use_amp,
+                        description=f"test {epoch}/{training['epochs']}",
+                    )
                 )
                 if test_loader is not None
                 else None
@@ -310,36 +403,68 @@ def main():
                 "backbone_learning_rate": learning_rates["backbone"],
                 "head_learning_rate": learning_rates["head"],
                 "train_loss": train_metrics["loss"],
-                "train_accuracy": train_metrics["accuracy"],
-                "train_macro_f1": train_metrics["macro_f1"],
                 "test_loss": (
                     test_metrics["loss"] if test_metrics is not None else None
                 ),
-                "test_accuracy": (
-                    test_metrics["accuracy"]
-                    if test_metrics is not None
-                    else None
-                ),
-                "test_macro_f1": (
-                    test_metrics["macro_f1"]
-                    if test_metrics is not None
-                    else None
-                ),
             }
+            if output_mode == "passage_directions":
+                row.update(
+                    {
+                        f"train_{key}": value
+                        for key, value in train_metrics.items()
+                        if key != "loss"
+                    }
+                )
+                if test_metrics is not None:
+                    row.update(
+                        {
+                            f"test_{key}": value
+                            for key, value in test_metrics.items()
+                            if key != "loss"
+                        }
+                    )
+            else:
+                row.update(
+                    {
+                        "train_accuracy": train_metrics["accuracy"],
+                        "train_macro_f1": train_metrics["macro_f1"],
+                        "test_accuracy": (
+                            test_metrics["accuracy"]
+                            if test_metrics is not None
+                            else None
+                        ),
+                        "test_macro_f1": (
+                            test_metrics["macro_f1"]
+                            if test_metrics is not None
+                            else None
+                        ),
+                    }
+                )
             metrics_writer.write(row)
-            message = (
-                f"epoch={epoch:03d} "
-                f"train_loss={train_metrics['loss']:.6f} "
-                f"train_acc={train_metrics['accuracy']:.4f} "
+            message = f"epoch={epoch:03d} train_loss={train_metrics['loss']:.6f} "
+            if output_mode == "passage_directions":
+                message += (
+                    f"train_dir_f1={train_metrics['direction_macro_f1']:.4f} "
+                    f"train_turn_f1={train_metrics['turning_f1']:.4f} "
+                )
+            else:
+                message += f"train_acc={train_metrics['accuracy']:.4f} "
+            message += (
                 f"backbone_lr={learning_rates['backbone']:.3e} "
                 f"head_lr={learning_rates['head']:.3e}"
             )
             if test_metrics is not None:
-                message += (
-                    f" test_loss={test_metrics['loss']:.6f} "
-                    f"test_acc={test_metrics['accuracy']:.4f} "
-                    f"test_macro_f1={test_metrics['macro_f1']:.4f}"
-                )
+                message += f" test_loss={test_metrics['loss']:.6f} "
+                if output_mode == "passage_directions":
+                    message += (
+                        f"test_dir_f1={test_metrics['direction_macro_f1']:.4f} "
+                        f"test_turn_f1={test_metrics['turning_f1']:.4f}"
+                    )
+                else:
+                    message += (
+                        f"test_acc={test_metrics['accuracy']:.4f} "
+                        f"test_macro_f1={test_metrics['macro_f1']:.4f}"
+                    )
             print(message)
 
             metric_source, metric_name = checkpoint_metric.split("_", 1)

@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- One-command runtime for the adopted RGB+Depth+GRU passage model. -->
+  <arg name="config_dir"
+       default="$(find corridor_classifier)/config/experiments/rgb_depth_gru_bags_passage_directions_stable"/>
+  <arg name="start_depth_estimator" default="true"/>
+  <arg name="unidepth_config_file"
+       default="$(find unidepth_ros)/config/unidepth.yaml"/>
+
+  <arg name="device_override" default=""/>
+  <arg name="inference_rate_override" default="0.0"/>
+  <arg name="unidepth_model_path_override" default=""/>
+  <arg name="unidepth_device_override" default=""/>
+  <arg name="unidepth_inference_rate_override" default="0.0"/>
+
+  <group if="$(arg start_depth_estimator)">
+    <include file="$(find unidepth_ros)/launch/unidepth.launch">
+      <arg name="config_file" value="$(arg unidepth_config_file)"/>
+      <arg name="model_path_override" value="$(arg unidepth_model_path_override)"/>
+      <arg name="device_override" value="$(arg unidepth_device_override)"/>
+      <arg name="inference_rate_override"
+           value="$(arg unidepth_inference_rate_override)"/>
+    </include>
+  </group>
+
+  <include file="$(find corridor_classifier)/launch/corridor_classifier.launch">
+    <arg name="config_dir" value="$(arg config_dir)"/>
+    <arg name="device_override" value="$(arg device_override)"/>
+    <arg name="inference_rate_override" value="$(arg inference_rate_override)"/>
+  </include>
+</launch>

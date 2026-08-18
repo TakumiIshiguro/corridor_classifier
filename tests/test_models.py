@@ -7,6 +7,7 @@ from torch import nn
 from corridor_classifier.models import (
     CorridorPredictor,
     MultimodalCorridorModel,
+    PassagePrediction,
     RGBModel,
     depth_to_tensor,
     load_model_checkpoint,
@@ -56,6 +57,29 @@ def test_multimodal_models_return_eight_logits(
         inputs["depth"] = torch.randn(2, sequence_length, 2, 32, 32)
 
     assert model(inputs).shape == (2, 8)
+
+
+def test_passage_direction_model_returns_separate_heads():
+    model = MultimodalCorridorModel(
+        dino=FakeDinoFeatures(),
+        num_classes=9,
+        use_depth=True,
+        use_gru=True,
+        depth_feature_dim=8,
+        fusion_dim=10,
+        gru_hidden_size=7,
+        output_mode="passage_directions",
+    )
+    outputs = model(
+        {
+            "rgb": torch.randn(2, 3, 3, 32, 32),
+            "depth": torch.randn(2, 3, 2, 32, 32),
+        }
+    )
+
+    assert outputs["direction_logits"].shape == (2, 3)
+    assert outputs["turning_logits"].shape == (2,)
+    assert model.classifier is None
 
 
 def test_depth_tensor_contains_log_depth_and_validity_mask():
@@ -120,6 +144,65 @@ def test_predictor_waits_for_full_strided_context(monkeypatch):
     assert outputs[-1] is not None
     assert predictor.required_context_length == 9
     assert observed["shape"][1] == 3
+
+
+def test_predictor_decodes_passage_direction_heads(monkeypatch):
+    model = MultimodalCorridorModel(
+        dino=FakeDinoFeatures(),
+        num_classes=9,
+        use_depth=False,
+        use_gru=False,
+        fusion_dim=10,
+        output_mode="passage_directions",
+    )
+    with torch.no_grad():
+        model.direction_classifier.weight.zero_()
+        model.direction_classifier.bias.copy_(torch.tensor([10.0, -10.0, 10.0]))
+        model.turning_classifier.weight.zero_()
+        model.turning_classifier.bias.fill_(-10.0)
+    monkeypatch.setattr(
+        "corridor_classifier.models.create_corridor_model",
+        lambda config: model,
+    )
+    monkeypatch.setattr(
+        "corridor_classifier.models.load_model_checkpoint",
+        lambda model, config, path: None,
+    )
+    predictor = CorridorPredictor(
+        {
+            "architecture": "rgb",
+            "output_mode": "passage_directions",
+            "class_names": [
+                "straight_road",
+                "dead_end",
+                "corner_right",
+                "corner_left",
+                "cross_road",
+                "3_way_right",
+                "3_way_center",
+                "3_way_left",
+                "turning",
+            ],
+            "device": "cpu",
+            "use_fp16": False,
+            "input_size": [32, 32],
+            "sequence_length": 1,
+            "frame_stride": 1,
+            "maximum_gap_seconds": 0.4,
+            "use_depth": False,
+            "direction_thresholds": [0.5, 0.5, 0.5],
+            "turning_threshold": 0.5,
+            "turning_class_name": "turning",
+        },
+        "unused.pth",
+    )
+
+    prediction = predictor.predict(Image.new("RGB", (32, 32)))
+
+    assert isinstance(prediction, PassagePrediction)
+    assert prediction.open_directions == (1, 0, 1)
+    assert prediction.class_name == "3_way_right"
+    assert prediction.is_turning is False
 
 
 def test_legacy_rgb_checkpoint_is_loaded(tmp_path):

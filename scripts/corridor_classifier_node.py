@@ -12,7 +12,10 @@ from std_msgs.msg import Float32MultiArray
 
 from corridor_classifier.config import load_config, package_root, resolve_path
 from corridor_classifier.image_subscriber import LatestImageSubscriber
-from corridor_classifier.messages import make_passage_message
+from corridor_classifier.messages import (
+    make_direction_passage_message,
+    make_passage_message,
+)
 from corridor_classifier.models import CorridorPredictor
 from corridor_classifier.synchronized_subscriber import (
     LatestRgbDepthSubscriber,
@@ -134,20 +137,44 @@ def main():
             )
             rate.sleep()
             continue
-        passage_publisher.publish(
-            make_passage_message(
-                prediction.class_index,
-                classifier.class_names,
+        if classifier.output_mode == "passage_directions":
+            passage_publisher.publish(
+                make_direction_passage_message(
+                    prediction.open_directions,
+                    prediction.is_turning,
+                    classifier.class_names,
+                    classifier.turning_class_name,
+                )
             )
-        )
-        probabilities_publisher.publish(
-            Float32MultiArray(data=list(prediction.probabilities))
-        )
-        rospy.loginfo(
-            "corridor=%s confidence=%.3f",
-            classifier.class_names[prediction.class_index],
-            prediction.confidence,
-        )
+            probabilities_publisher.publish(
+                Float32MultiArray(
+                    data=list(prediction.direction_probabilities)
+                    + [prediction.turning_probability]
+                )
+            )
+            rospy.loginfo(
+                "corridor=%s open(front,left,right)=%s "
+                "probabilities=(%.3f,%.3f,%.3f) turning=%.3f",
+                prediction.class_name,
+                prediction.open_directions,
+                *prediction.direction_probabilities,
+                prediction.turning_probability,
+            )
+        else:
+            passage_publisher.publish(
+                make_passage_message(
+                    prediction.class_index,
+                    classifier.class_names,
+                )
+            )
+            probabilities_publisher.publish(
+                Float32MultiArray(data=list(prediction.probabilities))
+            )
+            rospy.loginfo(
+                "corridor=%s confidence=%.3f",
+                classifier.class_names[prediction.class_index],
+                prediction.confidence,
+            )
         rate.sleep()
 
 

@@ -1,5 +1,6 @@
 from collections import deque
 from contextlib import nullcontext
+from dataclasses import dataclass
 from typing import Dict, Iterable, Optional, Sequence
 
 import numpy as np
@@ -16,9 +17,22 @@ from corridor_classifier.dino_classifier import (
     load_checkpoint,
     resolve_device,
 )
+from corridor_classifier.passage_directions import (
+    class_name_from_directions,
+    threshold_directions,
+)
 
 
 ARCHITECTURES = ("rgb", "rgb_gru", "rgb_depth", "rgb_depth_gru")
+
+
+@dataclass(frozen=True)
+class PassagePrediction:
+    direction_probabilities: tuple
+    open_directions: tuple
+    turning_probability: float
+    is_turning: bool
+    class_name: str
 
 
 class DepthEncoder(nn.Module):
@@ -70,11 +84,15 @@ class MultimodalCorridorModel(nn.Module):
         fusion_dim: int = 256,
         gru_hidden_size: int = 256,
         gru_num_layers: int = 1,
+        output_mode: str = "class",
     ):
         super().__init__()
         self.dino = dino
         self.use_depth = bool(use_depth)
         self.use_gru = bool(use_gru)
+        self.output_mode = str(output_mode)
+        if self.output_mode not in ("class", "passage_directions"):
+            raise ValueError(f"unsupported output_mode: {self.output_mode}")
         rgb_dim = int(getattr(dino, "num_features"))
         self.depth_encoder = (
             DepthEncoder(depth_feature_dim) if self.use_depth else None
@@ -96,7 +114,14 @@ class MultimodalCorridorModel(nn.Module):
         else:
             self.gru = None
             classifier_dim = int(fusion_dim)
-        self.classifier = nn.Linear(classifier_dim, int(num_classes))
+        if self.output_mode == "passage_directions":
+            self.direction_classifier = nn.Linear(classifier_dim, 3)
+            self.turning_classifier = nn.Linear(classifier_dim, 1)
+            self.classifier = None
+        else:
+            self.direction_classifier = None
+            self.turning_classifier = None
+            self.classifier = nn.Linear(classifier_dim, int(num_classes))
 
     def encode_frames(
         self,
@@ -120,7 +145,13 @@ class MultimodalCorridorModel(nn.Module):
             fused = fused.unsqueeze(1)
         if self.gru is not None:
             fused, _ = self.gru(fused)
-        return self.classifier(fused[:, -1])
+        features = fused[:, -1]
+        if self.output_mode == "passage_directions":
+            return {
+                "direction_logits": self.direction_classifier(features),
+                "turning_logits": self.turning_classifier(features).squeeze(-1),
+            }
+        return self.classifier(features)
 
     def forward(self, inputs: Dict[str, torch.Tensor]) -> torch.Tensor:
         rgb = inputs["rgb"]
@@ -162,7 +193,8 @@ def create_corridor_model(
         "pretrained": bool(pretrained),
         "pretrained_weights_path": pretrained_weights_path,
     }
-    if architecture == "rgb":
+    output_mode = str(model_config.get("output_mode", "class"))
+    if architecture == "rgb" and output_mode == "class":
         return RGBModel(
             create_dino_model(
                 num_classes=int(model_config["num_classes"]),
@@ -179,6 +211,7 @@ def create_corridor_model(
         fusion_dim=int(model_config.get("fusion_dim", 256)),
         gru_hidden_size=int(model_config.get("gru_hidden_size", 256)),
         gru_num_layers=int(model_config.get("gru_num_layers", 1)),
+        output_mode=output_mode,
     )
 
 
@@ -213,6 +246,11 @@ def load_model_checkpoint(model, model_config: Dict, path: str) -> None:
             model_config["class_names"]
         ):
             raise ValueError("checkpoint class_names do not match model.yaml")
+        checkpoint_output_mode = checkpoint.get("output_mode")
+        if checkpoint_output_mode is not None and str(
+            checkpoint_output_mode
+        ) != str(model_config.get("output_mode", "class")):
+            raise ValueError("checkpoint output_mode does not match model.yaml")
     state_dict = extract_state_dict(checkpoint)
     if isinstance(model, RGBModel) and not any(
         key.startswith("dino.") for key in state_dict
@@ -228,6 +266,17 @@ class CorridorPredictor:
     def __init__(self, model_config: Dict, checkpoint_path: str):
         self.model_config = dict(model_config)
         self.class_names = tuple(model_config["class_names"])
+        self.output_mode = str(model_config.get("output_mode", "class"))
+        self.direction_thresholds = tuple(
+            float(value)
+            for value in model_config.get("direction_thresholds", [0.5] * 3)
+        )
+        self.turning_threshold = float(
+            model_config.get("turning_threshold", 0.5)
+        )
+        self.turning_class_name = str(
+            model_config.get("turning_class_name", "turning")
+        )
         self.device = resolve_device(model_config.get("device", "auto"))
         self.use_fp16 = bool(model_config.get("use_fp16", True)) and (
             self.device.type == "cuda"
@@ -331,7 +380,37 @@ class CorridorPredictor:
                         .to(self.device, non_blocking=True)
                     }
                 )
-            probabilities = torch.softmax(logits.float(), dim=1)[0]
+            if self.output_mode == "passage_directions":
+                direction_probabilities = torch.sigmoid(
+                    logits["direction_logits"].float()
+                )[0]
+                turning_probability = torch.sigmoid(
+                    logits["turning_logits"].float()
+                )[0]
+            else:
+                probabilities = torch.softmax(logits.float(), dim=1)[0]
+        if self.output_mode == "passage_directions":
+            direction_values = tuple(
+                float(value)
+                for value in direction_probabilities.cpu().tolist()
+            )
+            open_directions = threshold_directions(
+                direction_values, self.direction_thresholds
+            )
+            turning_value = float(turning_probability.cpu())
+            is_turning = turning_value >= self.turning_threshold
+            class_name = (
+                self.turning_class_name
+                if is_turning
+                else class_name_from_directions(open_directions)
+            )
+            return PassagePrediction(
+                direction_probabilities=direction_values,
+                open_directions=open_directions,
+                turning_probability=turning_value,
+                is_turning=is_turning,
+                class_name=class_name,
+            )
         values = tuple(float(value) for value in probabilities.cpu().tolist())
         index = int(torch.argmax(probabilities))
         return Prediction(index, values[index], values)

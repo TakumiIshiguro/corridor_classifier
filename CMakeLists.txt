@@ -28,6 +28,7 @@ catkin_install_python(PROGRAMS
   scripts/corridor_classifier_node.py
   scripts/relabel_turning.py
   scripts/train.py
+  scripts/tune_passage_thresholds.py
   scripts/visualize_features.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )

@@ -9,6 +9,7 @@ from typing import Dict, Sequence
 import numpy as np
 import torch
 import yaml
+from torch import nn
 from torch.optim import Adam, AdamW, SGD
 from torch.optim.lr_scheduler import LambdaLR
 from tqdm.auto import tqdm
@@ -68,6 +69,68 @@ def sequence_sampling_weights(
         weights.append(class_factor * session_factor)
     result = torch.tensor(weights, dtype=torch.double)
     return result / result.mean()
+
+
+class PassageDirectionLoss(nn.Module):
+    def __init__(
+        self,
+        direction_pos_weight: torch.Tensor = None,
+        turning_pos_weight: torch.Tensor = None,
+        direction_loss_weight: float = 1.0,
+        turning_loss_weight: float = 1.0,
+    ):
+        super().__init__()
+        direction_weight = (
+            torch.ones(3, dtype=torch.float32)
+            if direction_pos_weight is None
+            else torch.as_tensor(direction_pos_weight, dtype=torch.float32)
+        )
+        if direction_weight.shape != (3,):
+            raise ValueError("direction_pos_weight must contain 3 values")
+        turning_weight = (
+            torch.tensor(1.0, dtype=torch.float32)
+            if turning_pos_weight is None
+            else torch.as_tensor(turning_pos_weight, dtype=torch.float32)
+        )
+        if turning_weight.numel() != 1:
+            raise ValueError("turning_pos_weight must contain one value")
+        self.register_buffer("direction_pos_weight", direction_weight)
+        self.register_buffer("turning_pos_weight", turning_weight.reshape(()))
+        self.direction_loss_weight = float(direction_loss_weight)
+        self.turning_loss_weight = float(turning_loss_weight)
+
+    def forward(self, outputs: Dict[str, torch.Tensor], targets: Dict):
+        direction_logits = outputs["direction_logits"]
+        turning_logits = outputs["turning_logits"]
+        direction_targets = targets["directions"].to(
+            dtype=direction_logits.dtype
+        )
+        direction_mask = targets["direction_mask"].to(
+            dtype=direction_logits.dtype
+        )
+        turning_targets = targets["turning"].to(dtype=turning_logits.dtype)
+        direction_losses = nn.functional.binary_cross_entropy_with_logits(
+            direction_logits,
+            direction_targets,
+            pos_weight=self.direction_pos_weight,
+            reduction="none",
+        ).mean(dim=1)
+        valid_direction_count = direction_mask.sum()
+        direction_loss = (
+            (direction_losses * direction_mask).sum()
+            / valid_direction_count.clamp_min(1.0)
+        )
+        if float(valid_direction_count.detach()) == 0.0:
+            direction_loss = direction_losses.sum() * 0.0
+        turning_loss = nn.functional.binary_cross_entropy_with_logits(
+            turning_logits,
+            turning_targets,
+            pos_weight=self.turning_pos_weight,
+        )
+        return (
+            self.direction_loss_weight * direction_loss
+            + self.turning_loss_weight * turning_loss
+        )
 
 
 def last_blocks_for_epoch(
@@ -365,6 +428,151 @@ def run_epoch(
     }
 
 
+def _binary_f1(true_positive: float, false_positive: float, false_negative: float):
+    denominator = 2.0 * true_positive + false_positive + false_negative
+    return 0.0 if denominator == 0.0 else 2.0 * true_positive / denominator
+
+
+def run_passage_epoch(
+    model,
+    loader,
+    criterion,
+    device,
+    direction_thresholds: Sequence[float],
+    turning_threshold: float,
+    optimizer=None,
+    scheduler=None,
+    scaler=None,
+    use_amp: bool = False,
+    description: str = None,
+) -> Dict[str, float]:
+    thresholds = torch.as_tensor(direction_thresholds, dtype=torch.float32)
+    if thresholds.shape != (3,):
+        raise ValueError("direction_thresholds must contain 3 values")
+    training = optimizer is not None
+    model.train(training)
+    total_loss = 0.0
+    total_samples = 0
+    direction_tp = torch.zeros(3, dtype=torch.int64)
+    direction_fp = torch.zeros(3, dtype=torch.int64)
+    direction_fn = torch.zeros(3, dtype=torch.int64)
+    direction_exact_correct = 0
+    direction_samples = 0
+    turning_tp = 0
+    turning_fp = 0
+    turning_fn = 0
+    turning_correct = 0
+
+    progress = tqdm(
+        loader,
+        desc=description or ("train" if training else "test"),
+        unit="batch",
+        dynamic_ncols=True,
+        mininterval=0.5,
+    )
+    for inputs, targets in progress:
+        inputs = {
+            key: value.to(device, non_blocking=True)
+            for key, value in inputs.items()
+        }
+        targets = {
+            key: value.to(device, non_blocking=True)
+            for key, value in targets.items()
+        }
+        if training:
+            optimizer.zero_grad(set_to_none=True)
+
+        autocast_context = (
+            torch.autocast(device_type="cuda", dtype=torch.float16)
+            if use_amp
+            else nullcontext()
+        )
+        with torch.set_grad_enabled(training), autocast_context:
+            outputs = model(inputs)
+            loss = criterion(outputs, targets)
+
+        if training:
+            optimizer_stepped = True
+            if scaler is not None and scaler.is_enabled():
+                previous_scale = scaler.get_scale()
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer_stepped = scaler.get_scale() >= previous_scale
+            else:
+                loss.backward()
+                optimizer.step()
+            if scheduler is not None and optimizer_stepped:
+                scheduler.step()
+
+        batch_size = int(targets["turning"].shape[0])
+        total_loss += float(loss.detach()) * batch_size
+        total_samples += batch_size
+        direction_predictions = (
+            torch.sigmoid(outputs["direction_logits"].detach()).cpu()
+            >= thresholds
+        )
+        direction_targets = targets["directions"].detach().cpu().bool()
+        direction_mask = targets["direction_mask"].detach().cpu().bool()
+        if direction_mask.any():
+            valid_predictions = direction_predictions[direction_mask]
+            valid_targets = direction_targets[direction_mask]
+            direction_tp += (valid_predictions & valid_targets).sum(dim=0)
+            direction_fp += (valid_predictions & ~valid_targets).sum(dim=0)
+            direction_fn += (~valid_predictions & valid_targets).sum(dim=0)
+            direction_exact_correct += int(
+                (valid_predictions == valid_targets).all(dim=1).sum()
+            )
+            direction_samples += int(direction_mask.sum())
+        turning_predictions = (
+            torch.sigmoid(outputs["turning_logits"].detach()).cpu()
+            >= float(turning_threshold)
+        )
+        turning_targets = targets["turning"].detach().cpu().bool()
+        turning_tp += int((turning_predictions & turning_targets).sum())
+        turning_fp += int((turning_predictions & ~turning_targets).sum())
+        turning_fn += int((~turning_predictions & turning_targets).sum())
+        turning_correct += int((turning_predictions == turning_targets).sum())
+        progress.set_postfix(
+            {
+                "loss": f"{total_loss / total_samples:.4f}",
+                "dir_exact": (
+                    f"{direction_exact_correct / direction_samples:.3f}"
+                    if direction_samples
+                    else "n/a"
+                ),
+            }
+        )
+
+    if total_samples == 0:
+        raise ValueError("data loader contains no samples")
+    direction_f1 = [
+        _binary_f1(
+            float(direction_tp[index]),
+            float(direction_fp[index]),
+            float(direction_fn[index]),
+        )
+        for index in range(3)
+    ]
+    direction_macro_f1 = sum(direction_f1) / len(direction_f1)
+    turning_f1 = _binary_f1(turning_tp, turning_fp, turning_fn)
+    return {
+        "loss": total_loss / total_samples,
+        "direction_front_f1": direction_f1[0],
+        "direction_left_f1": direction_f1[1],
+        "direction_right_f1": direction_f1[2],
+        "direction_macro_f1": direction_macro_f1,
+        "direction_exact_accuracy": (
+            direction_exact_correct / direction_samples
+            if direction_samples
+            else 0.0
+        ),
+        "turning_f1": turning_f1,
+        "turning_accuracy": turning_correct / total_samples,
+        "passage_macro_f1": (3.0 * direction_macro_f1 + turning_f1) / 4.0,
+    }
+
+
 def save_checkpoint(
     path: str,
     model,
@@ -388,6 +596,7 @@ def save_checkpoint(
             "model_name": str(model_config["model_name"]),
             "input_size": list(model_config["input_size"]),
             "num_classes": int(model_config["num_classes"]),
+            "output_mode": str(model_config.get("output_mode", "class")),
             "architecture": str(model_config.get("architecture", "rgb")),
             "variant": {
                 key: model_config[key]
@@ -403,6 +612,10 @@ def save_checkpoint(
                     "fusion_dim",
                     "gru_hidden_size",
                     "gru_num_layers",
+                    "direction_names",
+                    "direction_thresholds",
+                    "turning_class_name",
+                    "turning_threshold",
                 )
                 if key in model_config
             },
@@ -422,7 +635,7 @@ def write_effective_config(path: str, config: Dict) -> None:
 
 
 class MetricsWriter:
-    FIELDS = (
+    CLASSIFICATION_FIELDS = (
         "epoch",
         "last_blocks",
         "trainable_parameters",
@@ -436,16 +649,43 @@ class MetricsWriter:
         "test_macro_f1",
     )
 
-    def __init__(self, path: str):
+    PASSAGE_FIELDS = (
+        "epoch",
+        "last_blocks",
+        "trainable_parameters",
+        "backbone_learning_rate",
+        "head_learning_rate",
+        "train_loss",
+        "train_direction_front_f1",
+        "train_direction_left_f1",
+        "train_direction_right_f1",
+        "train_direction_macro_f1",
+        "train_direction_exact_accuracy",
+        "train_turning_f1",
+        "train_turning_accuracy",
+        "train_passage_macro_f1",
+        "test_loss",
+        "test_direction_front_f1",
+        "test_direction_left_f1",
+        "test_direction_right_f1",
+        "test_direction_macro_f1",
+        "test_direction_exact_accuracy",
+        "test_turning_f1",
+        "test_turning_accuracy",
+        "test_passage_macro_f1",
+    )
+
+    def __init__(self, path: str, fields: Sequence[str] = None):
         self.path = os.path.abspath(path)
+        self.fields = tuple(fields or self.CLASSIFICATION_FIELDS)
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         self._stream = open(self.path, "w", newline="")
-        self._writer = csv.DictWriter(self._stream, fieldnames=self.FIELDS)
+        self._writer = csv.DictWriter(self._stream, fieldnames=self.fields)
         self._writer.writeheader()
         self._stream.flush()
 
     def write(self, values: Dict) -> None:
-        self._writer.writerow({key: values[key] for key in self.FIELDS})
+        self._writer.writerow({key: values.get(key) for key in self.fields})
         self._stream.flush()
 
     def close(self) -> None:

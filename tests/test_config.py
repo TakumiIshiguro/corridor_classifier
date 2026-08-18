@@ -131,3 +131,19 @@ def test_all_architecture_configs_are_valid(
     assert config["model"]["use_gru"] is use_gru
     assert config["model"]["sequence_length"] == sequence_length
     assert config["model"]["frame_stride"] == 1
+
+
+def test_passage_direction_experiment_config_is_valid():
+    config = load_training_config(
+        os.path.join(
+            package_root(),
+            "config/experiments/rgb_depth_gru_bags_passage_directions",
+        )
+    )
+
+    assert config["model"]["output_mode"] == "passage_directions"
+    assert config["model"]["direction_names"] == ["front", "left", "right"]
+    assert config["model"]["direction_thresholds"] == [0.5, 0.5, 0.5]
+    assert config["training"]["checkpoint_metric"] == (
+        "test_direction_macro_f1"
+    )

@@ -4,6 +4,7 @@ from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from corridor_classifier.training import (
+    PassageDirectionLoss,
     class_weights_from_counts,
     configure_trainable_layers,
     create_optimizer,
@@ -12,6 +13,7 @@ from corridor_classifier.training import (
     learning_rate_multiplier,
     parameter_groups,
     run_epoch,
+    run_passage_epoch,
     sequence_sampling_weights,
 )
 
@@ -196,3 +198,72 @@ def test_run_epoch_accepts_dictionary_inputs():
     )
 
     assert metrics["loss"] > 0.0
+
+
+def test_passage_loss_masks_directions_while_turning():
+    direction_logits = torch.randn(2, 3, requires_grad=True)
+    turning_logits = torch.randn(2, requires_grad=True)
+    criterion = PassageDirectionLoss()
+    loss = criterion(
+        {
+            "direction_logits": direction_logits,
+            "turning_logits": turning_logits,
+        },
+        {
+            "directions": torch.zeros(2, 3),
+            "direction_mask": torch.zeros(2),
+            "turning": torch.ones(2),
+        },
+    )
+
+    loss.backward()
+
+    assert torch.equal(direction_logits.grad, torch.zeros_like(direction_logits))
+    assert torch.any(turning_logits.grad != 0.0)
+
+
+class DictionaryPassageModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.direction_head = nn.Linear(3, 3)
+        self.turning_head = nn.Linear(3, 1)
+
+    def forward(self, inputs):
+        features = inputs["rgb"].mean(dim=(-2, -1))
+        return {
+            "direction_logits": self.direction_head(features),
+            "turning_logits": self.turning_head(features).squeeze(-1),
+        }
+
+
+def test_run_passage_epoch_reports_direction_and_turning_metrics():
+    model = DictionaryPassageModel()
+    dataset = [
+        (
+            {"rgb": torch.randn(3, 2, 2)},
+            {
+                "directions": torch.tensor([1.0, index % 2, 0.0]),
+                "direction_mask": torch.tensor(float(index != 3)),
+                "turning": torch.tensor(float(index == 3)),
+            },
+        )
+        for index in range(4)
+    ]
+    loader = DataLoader(dataset, batch_size=2)
+    metrics = run_passage_epoch(
+        model=model,
+        loader=loader,
+        criterion=PassageDirectionLoss(),
+        device=torch.device("cpu"),
+        direction_thresholds=[0.5, 0.5, 0.5],
+        turning_threshold=0.5,
+    )
+
+    assert metrics["loss"] > 0.0
+    assert 0.0 <= metrics["direction_macro_f1"] <= 1.0
+    assert 0.0 <= metrics["direction_exact_accuracy"] <= 1.0
+    assert 0.0 <= metrics["turning_f1"] <= 1.0
+    expected = (
+        3.0 * metrics["direction_macro_f1"] + metrics["turning_f1"]
+    ) / 4.0
+    assert metrics["passage_macro_f1"] == pytest.approx(expected)

@@ -12,6 +12,7 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 
 from corridor_classifier.models import depth_to_tensor
+from corridor_classifier.passage_directions import passage_target_from_index
 
 
 @dataclass(frozen=True)
@@ -180,6 +181,17 @@ class CorridorMultiInputDataset(Dataset):
             variant_config.get("maximum_gap_seconds", 0.4)
         )
         self.use_depth = bool(variant_config["use_depth"])
+        self.output_mode = str(variant_config.get("output_mode", "class"))
+        self.class_names = tuple(variant_config.get("class_names", ()))
+        self.turning_class_name = str(
+            variant_config.get("turning_class_name", "turning")
+        )
+        if self.output_mode not in ("class", "passage_directions"):
+            raise ValueError(f"unsupported output_mode: {self.output_mode}")
+        if self.output_mode == "passage_directions" and not self.class_names:
+            raise ValueError(
+                "passage_directions output requires configured class_names"
+            )
         self.depth_min_m = float(variant_config.get("depth_min_m", 0.1))
         self.depth_max_m = float(variant_config.get("depth_max_m", 10.0))
         augmentation = dict(augmentation_config or {})
@@ -296,4 +308,10 @@ class CorridorMultiInputDataset(Dataset):
                 for key, value in inputs.items()
             }
             label = {2: 3, 3: 2, 5: 7, 7: 5}.get(label, label)
+        if self.output_mode == "passage_directions":
+            return inputs, passage_target_from_index(
+                label,
+                self.class_names,
+                self.turning_class_name,
+            )
         return inputs, label

@@ -3,6 +3,11 @@ from typing import Any, Dict
 
 import yaml
 
+from corridor_classifier.passage_directions import (
+    CLASS_TO_DIRECTIONS,
+    DIRECTION_NAMES,
+)
+
 
 ARCHITECTURES = ("rgb", "rgb_gru", "rgb_depth", "rgb_depth_gru")
 
@@ -84,6 +89,54 @@ def _validate_config(config: Dict[str, Any]) -> None:
         raise ValueError("model.class_names must contain unique names")
     model["num_classes"] = num_classes
     model["class_names"] = [str(name) for name in class_names]
+    output_mode = str(model.get("output_mode", "class")).strip().lower()
+    if output_mode not in ("class", "passage_directions"):
+        raise ValueError(
+            "model.output_mode must be class or passage_directions"
+        )
+    model["output_mode"] = output_mode
+    if output_mode == "passage_directions":
+        missing_passage_classes = [
+            name for name in CLASS_TO_DIRECTIONS if name not in class_names
+        ]
+        if missing_passage_classes:
+            raise ValueError(
+                "passage_directions requires source class(es): "
+                + ", ".join(missing_passage_classes)
+            )
+        direction_names = model.get("direction_names", list(DIRECTION_NAMES))
+        if list(direction_names) != list(DIRECTION_NAMES):
+            raise ValueError(
+                "model.direction_names must be [front, left, right]"
+            )
+        direction_thresholds = [
+            float(value)
+            for value in model.get("direction_thresholds", [0.5, 0.5, 0.5])
+        ]
+        if len(direction_thresholds) != 3 or any(
+            not 0.0 < value < 1.0 for value in direction_thresholds
+        ):
+            raise ValueError(
+                "model.direction_thresholds must contain 3 values in (0, 1)"
+            )
+        turning_class_name = str(
+            model.get("turning_class_name", "turning")
+        ).strip()
+        if turning_class_name not in class_names:
+            raise ValueError(
+                "model.turning_class_name must exist in model.class_names"
+            )
+        turning_threshold = float(model.get("turning_threshold", 0.5))
+        if not 0.0 < turning_threshold < 1.0:
+            raise ValueError("model.turning_threshold must be in (0, 1)")
+        model.update(
+            {
+                "direction_names": list(DIRECTION_NAMES),
+                "direction_thresholds": direction_thresholds,
+                "turning_class_name": turning_class_name,
+                "turning_threshold": turning_threshold,
+            }
+        )
     model["sequence_length"] = int(model.get("sequence_length", 1))
     if model["sequence_length"] <= 0:
         raise ValueError("model.sequence_length must be positive")

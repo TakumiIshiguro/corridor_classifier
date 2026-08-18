@@ -1,0 +1,32 @@
+model:
+  architecture: rgb_depth
+  output_mode: passage_directions
+  model_name: vit_base_patch14_dinov2.lvd142m
+  input_size: [336, 336]
+  num_classes: 9
+  class_names:
+    - straight_road
+    - dead_end
+    - corner_right
+    - corner_left
+    - cross_road
+    - 3_way_right
+    - 3_way_center
+    - 3_way_left
+    - turning
+  direction_names: [front, left, right]
+  direction_thresholds: [0.5, 0.5, 0.5]
+  turning_class_name: turning
+  device: auto
+  use_fp16: false
+  strict_checkpoint: true
+  dino_readout: last_cls_regional3
+  checkpoint_path: weights/experiments/linear_probe_vitb14_336/probe.pth
+  sequence_length: 1
+  use_depth: true
+  use_gru: false
+  depth_min_m: 0.1
+  depth_max_m: 10.0
+
+runtime:
+  inference_rate: 4.0

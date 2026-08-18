@@ -1,0 +1,32 @@
+dataset:
+  train_data_dir: dataset/corridor_336/train
+  train_session_names: [a_f, g, h]
+  test_data_dir: dataset/corridor_336/test
+  test_session_names: [i, j, k, l, m, n]
+  train_sequence_step: 1
+  test_sequence_step: 1
+  num_workers: 4
+
+training:
+  epochs: 1
+  batch_size: 32
+  use_test: true
+  use_amp: false
+  seed: 0
+  freeze_backbone_epochs: 1
+  unfreeze_schedule: []
+  pretrained_weights_path: ""
+
+optimizer:
+  name: adamw
+  head_learning_rate: 0.00002
+  backbone_learning_rate: 0.000001
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+  epsilon: 1.0e-8
+
+scheduler:
+  name: constant
+  warmup_epochs: 0
+  warmup_start_factor: 1.0
+  min_learning_rate_ratio: 1.0

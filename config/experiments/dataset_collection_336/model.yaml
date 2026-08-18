@@ -1,0 +1,22 @@
+model:
+  architecture: rgb
+  checkpoint_path: weights/corridor_classifier.pth
+  model_name: vit_small_patch14_dinov2.lvd142m
+  input_size: [336, 336]
+  num_classes: 9
+  class_names:
+    - straight_road
+    - dead_end
+    - corner_right
+    - corner_left
+    - cross_road
+    - 3_way_right
+    - 3_way_center
+    - 3_way_left
+    - turning
+  device: auto
+  use_fp16: true
+  strict_checkpoint: true
+
+runtime:
+  inference_rate: 4.0

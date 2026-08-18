@@ -11,6 +11,7 @@ from scenario_navigation_msgs.msg import cmd_dir_intersection
 from std_msgs.msg import Float32MultiArray
 
 from corridor_classifier.config import load_config, package_root, resolve_path
+from corridor_classifier.direction_debouncer import ConsecutiveConfirmDebouncer
 from corridor_classifier.image_subscriber import LatestImageSubscriber
 from corridor_classifier.messages import (
     make_direction_passage_message,
@@ -20,6 +21,7 @@ from corridor_classifier.models import CorridorPredictor
 from corridor_classifier.synchronized_subscriber import (
     LatestRgbDepthSubscriber,
 )
+from corridor_classifier.turning_gate import CmdVelTurningGate
 
 
 def _apply_ros_overrides(config):
@@ -61,6 +63,23 @@ def main():
         )
 
     classifier = CorridorPredictor(model_config, checkpoint_path)
+    turning_class_name = str(model_config.get("turning_class_name", "turning"))
+    turning_index = classifier.class_names.index(turning_class_name)
+    confirm_frames = int(rospy.get_param("~direction_confirm_frames", 2))
+    debouncer = (
+        ConsecutiveConfirmDebouncer(initial=(False, False, False), confirm_frames=confirm_frames)
+        if classifier.output_mode == "passage_directions"
+        else ConsecutiveConfirmDebouncer(initial=(0,), confirm_frames=confirm_frames)
+    )
+    turning_gate = CmdVelTurningGate(
+        topic=str(rospy.get_param("~cmd_vel_topic", "/cmd_vel")),
+        threshold_rad_s=float(
+            rospy.get_param("~turning_angular_speed_threshold_rad_s", 0.20)
+        ),
+        stale_timeout_seconds=float(
+            rospy.get_param("~turning_stale_timeout_seconds", 1.0)
+        ),
+    )
     bridge = CvBridge()
     if classifier.use_depth:
         subscriber = LatestRgbDepthSubscriber(
@@ -97,6 +116,18 @@ def main():
     )
 
     while not rospy.is_shutdown():
+        if turning_gate.is_turning():
+            # Discard hysteresis built up before the turn: the corridor
+            # shape on the other side of a turn is unrelated to it.
+            debouncer.reset()
+            passage_publisher.publish(
+                make_passage_message(turning_index, classifier.class_names)
+            )
+            probabilities_publisher.publish(Float32MultiArray(data=[]))
+            rospy.loginfo_throttle(1.0, "corridor=%s (cmd_vel turning)", turning_class_name)
+            rate.sleep()
+            continue
+
         received = subscriber.take_latest()
         if received is None:
             rate.sleep()
@@ -138,32 +169,33 @@ def main():
             rate.sleep()
             continue
         if classifier.output_mode == "passage_directions":
+            stable_directions = tuple(
+                debouncer.update(tuple(bool(v) for v in prediction.open_directions))
+            )
             passage_publisher.publish(
                 make_direction_passage_message(
-                    prediction.open_directions,
-                    prediction.is_turning,
+                    stable_directions,
                     classifier.class_names,
-                    classifier.turning_class_name,
                 )
             )
             probabilities_publisher.publish(
                 Float32MultiArray(
                     data=list(prediction.direction_probabilities)
-                    + [prediction.turning_probability]
                 )
             )
             rospy.loginfo(
-                "corridor=%s open(front,left,right)=%s "
-                "probabilities=(%.3f,%.3f,%.3f) turning=%.3f",
+                "corridor=%s open(front,left,right)=%s raw=%s "
+                "probabilities=(%.3f,%.3f,%.3f)",
                 prediction.class_name,
+                stable_directions,
                 prediction.open_directions,
                 *prediction.direction_probabilities,
-                prediction.turning_probability,
             )
         else:
+            (stable_class_index,) = debouncer.update((prediction.class_index,))
             passage_publisher.publish(
                 make_passage_message(
-                    prediction.class_index,
+                    stable_class_index,
                     classifier.class_names,
                 )
             )
@@ -171,7 +203,8 @@ def main():
                 Float32MultiArray(data=list(prediction.probabilities))
             )
             rospy.loginfo(
-                "corridor=%s confidence=%.3f",
+                "corridor=%s raw=%s confidence=%.3f",
+                classifier.class_names[stable_class_index],
                 classifier.class_names[prediction.class_index],
                 prediction.confidence,
             )

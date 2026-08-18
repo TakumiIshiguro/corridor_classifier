@@ -24,6 +24,7 @@ def test_default_config_has_nine_unique_classes_including_turning():
     assert config["model"]["frame_stride"] == 1
     assert config["model"]["input_size"] == [224, 224]
     assert config["model"]["num_classes"] == 9
+    assert config["model"]["dino_readout"] == "last_cls"
     assert len(set(config["model"]["class_names"])) == 9
     assert config["model"]["class_names"][-1] == "turning"
     assert config["runtime"] == {"inference_rate": 4.0}
@@ -147,3 +148,32 @@ def test_passage_direction_experiment_config_is_valid():
     assert config["training"]["checkpoint_metric"] == (
         "test_direction_macro_f1"
     )
+
+
+def test_invalid_dino_readout_is_rejected():
+    config_dir = os.path.join(package_root(), "config")
+    model_data = load_yaml(os.path.join(config_dir, "model.yaml"))
+    config = {
+        "model": deepcopy(model_data["model"]),
+        "runtime": deepcopy(model_data["runtime"]),
+        "topics": load_yaml(os.path.join(config_dir, "topics.yaml")),
+    }
+    config["model"]["dino_readout"] = "unknown"
+
+    with pytest.raises(ValueError, match="dino_readout"):
+        _validate_config(config)
+
+
+def test_invalid_depth_pool_size_is_rejected():
+    config_dir = os.path.join(package_root(), "config")
+    model_data = load_yaml(os.path.join(config_dir, "model.yaml"))
+    config = {
+        "model": deepcopy(model_data["model"]),
+        "runtime": deepcopy(model_data["runtime"]),
+        "topics": load_yaml(os.path.join(config_dir, "topics.yaml")),
+    }
+    config["model"]["architecture"] = "rgb_depth_gru"
+    config["model"]["variants"]["rgb_depth_gru"]["depth_pool_size"] = 0
+
+    with pytest.raises(ValueError, match="depth_pool_size"):
+        _validate_config(config)

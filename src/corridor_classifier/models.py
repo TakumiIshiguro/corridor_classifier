@@ -24,6 +24,12 @@ from corridor_classifier.passage_directions import (
 
 
 ARCHITECTURES = ("rgb", "rgb_gru", "rgb_depth", "rgb_depth_gru")
+DINO_READOUTS = {
+    "last_cls": (1, False),
+    "last_cls_patch_mean": (1, True),
+    "last4_cls": (4, False),
+    "last4_cls_patch_mean": (4, True),
+}
 
 
 @dataclass(frozen=True)
@@ -36,8 +42,11 @@ class PassagePrediction:
 
 
 class DepthEncoder(nn.Module):
-    def __init__(self, output_dim: int):
+    def __init__(self, output_dim: int, pool_size: int = 1):
         super().__init__()
+        self.pool_size = int(pool_size)
+        if self.pool_size <= 0:
+            raise ValueError("depth pool size must be positive")
         self.features = nn.Sequential(
             nn.Conv2d(2, 32, kernel_size=5, stride=2, padding=2),
             nn.BatchNorm2d(32),
@@ -48,9 +57,12 @@ class DepthEncoder(nn.Module):
             nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(128),
             nn.GELU(),
-            nn.AdaptiveAvgPool2d(1),
+            nn.AdaptiveAvgPool2d((self.pool_size, self.pool_size)),
         )
-        self.projection = nn.Linear(128, int(output_dim))
+        self.projection = nn.Linear(
+            128 * self.pool_size * self.pool_size,
+            int(output_dim),
+        )
 
     def forward(self, depth: torch.Tensor) -> torch.Tensor:
         return self.projection(self.features(depth).flatten(1))
@@ -81,21 +93,31 @@ class MultimodalCorridorModel(nn.Module):
         use_depth: bool,
         use_gru: bool,
         depth_feature_dim: int = 128,
+        depth_pool_size: int = 1,
         fusion_dim: int = 256,
         gru_hidden_size: int = 256,
         gru_num_layers: int = 1,
         output_mode: str = "class",
+        dino_readout: str = "last_cls",
     ):
         super().__init__()
         self.dino = dino
         self.use_depth = bool(use_depth)
         self.use_gru = bool(use_gru)
         self.output_mode = str(output_mode)
+        self.dino_readout = str(dino_readout)
         if self.output_mode not in ("class", "passage_directions"):
             raise ValueError(f"unsupported output_mode: {self.output_mode}")
-        rgb_dim = int(getattr(dino, "num_features"))
+        if self.dino_readout not in DINO_READOUTS:
+            raise ValueError(f"unsupported DINO readout: {self.dino_readout}")
+        readout_layers, append_patch_mean = DINO_READOUTS[self.dino_readout]
+        rgb_dim = int(getattr(dino, "num_features")) * (
+            readout_layers + int(append_patch_mean)
+        )
         self.depth_encoder = (
-            DepthEncoder(depth_feature_dim) if self.use_depth else None
+            DepthEncoder(depth_feature_dim, depth_pool_size)
+            if self.use_depth
+            else None
         )
         combined_dim = rgb_dim + (int(depth_feature_dim) if self.use_depth else 0)
         self.fusion = nn.Sequential(
@@ -130,7 +152,7 @@ class MultimodalCorridorModel(nn.Module):
     ) -> torch.Tensor:
         if rgb.ndim != 4:
             raise ValueError("rgb frames must have shape NxCxHxW")
-        rgb_features = self.dino(rgb)
+        rgb_features = self._encode_rgb(rgb)
         features = [rgb_features]
         if self.use_depth:
             if depth is None:
@@ -139,6 +161,32 @@ class MultimodalCorridorModel(nn.Module):
                 raise ValueError("depth frames must match the rgb batch")
             features.append(self.depth_encoder(depth))
         return self.fusion(torch.cat(features, dim=-1))
+
+    def _encode_rgb(self, rgb: torch.Tensor) -> torch.Tensor:
+        if self.dino_readout == "last_cls":
+            return self.dino(rgb)
+        if not hasattr(self.dino, "get_intermediate_layers"):
+            raise ValueError(
+                "DINO model must expose get_intermediate_layers for "
+                f"readout {self.dino_readout}"
+            )
+        readout_layers, append_patch_mean = DINO_READOUTS[
+            self.dino_readout
+        ]
+        outputs = self.dino.get_intermediate_layers(
+            rgb,
+            n=readout_layers,
+            return_prefix_tokens=True,
+            norm=True,
+        )
+        class_features = torch.cat(
+            [prefix_tokens[:, 0] for _, prefix_tokens in outputs],
+            dim=-1,
+        )
+        if not append_patch_mean:
+            return class_features
+        patch_mean = outputs[-1][0].mean(dim=1)
+        return torch.cat((class_features, patch_mean), dim=-1)
 
     def classify_features(self, fused: torch.Tensor) -> torch.Tensor:
         if fused.ndim == 2:
@@ -208,10 +256,12 @@ def create_corridor_model(
         use_depth=bool(model_config["use_depth"]),
         use_gru=bool(model_config["use_gru"]),
         depth_feature_dim=int(model_config.get("depth_feature_dim", 128)),
+        depth_pool_size=int(model_config.get("depth_pool_size", 1)),
         fusion_dim=int(model_config.get("fusion_dim", 256)),
         gru_hidden_size=int(model_config.get("gru_hidden_size", 256)),
         gru_num_layers=int(model_config.get("gru_num_layers", 1)),
         output_mode=output_mode,
+        dino_readout=str(model_config.get("dino_readout", "last_cls")),
     )
 
 
@@ -251,6 +301,19 @@ def load_model_checkpoint(model, model_config: Dict, path: str) -> None:
             checkpoint_output_mode
         ) != str(model_config.get("output_mode", "class")):
             raise ValueError("checkpoint output_mode does not match model.yaml")
+        checkpoint_variant = checkpoint.get("variant", {})
+        checkpoint_readout = checkpoint_variant.get("dino_readout")
+        if checkpoint_readout is not None and str(checkpoint_readout) != str(
+            model_config.get("dino_readout", "last_cls")
+        ):
+            raise ValueError("checkpoint DINO readout does not match model.yaml")
+        checkpoint_depth_pool_size = checkpoint_variant.get("depth_pool_size")
+        if checkpoint_depth_pool_size is not None and int(
+            checkpoint_depth_pool_size
+        ) != int(model_config.get("depth_pool_size", 1)):
+            raise ValueError(
+                "checkpoint depth pool size does not match model.yaml"
+            )
     state_dict = extract_state_dict(checkpoint)
     if isinstance(model, RGBModel) and not any(
         key.startswith("dino.") for key in state_dict

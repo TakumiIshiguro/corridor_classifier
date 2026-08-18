@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+import torch
 from PIL import Image
 
 from corridor_classifier.collection import DatasetSessionWriter
@@ -171,6 +172,85 @@ def test_horizontal_flip_remaps_directional_label(tmp_path):
     _, label = dataset[0]
 
     assert label == 3
+
+
+def test_rgb_modality_dropout_uses_neutral_normalized_input(tmp_path):
+    image_path = tmp_path / "image.png"
+    Image.new("RGB", (224, 224), color=(255, 255, 255)).save(image_path)
+    sample = CorridorSample(str(image_path), 0, "session", stamp=1.0)
+    dataset = CorridorMultiInputDataset(
+        [sample],
+        [224, 224],
+        {"sequence_length": 1, "use_depth": False},
+        augmentation_config={"rgb_dropout_probability": 1.0},
+    )
+
+    inputs, _ = dataset[0]
+
+    assert torch.count_nonzero(inputs["rgb"]) == 0
+
+
+def test_rgb_modality_dropout_probability_is_validated(tmp_path):
+    image_path = tmp_path / "image.png"
+    Image.new("RGB", (224, 224)).save(image_path)
+    sample = CorridorSample(str(image_path), 0, "session", stamp=1.0)
+
+    with pytest.raises(ValueError, match="rgb_dropout_probability"):
+        CorridorMultiInputDataset(
+            [sample],
+            [224, 224],
+            {"sequence_length": 1, "use_depth": False},
+            augmentation_config={"rgb_dropout_probability": 1.1},
+        )
+
+
+def test_temporal_augmentation_uses_one_rgb_and_depth_transform(tmp_path):
+    samples = []
+    image = Image.new("RGB", (224, 224), color=(180, 80, 30))
+    depth = np.full((224, 224), 2.0, dtype=np.float32)
+    for index in range(3):
+        image_path = tmp_path / f"consistent_{index}.png"
+        depth_path = tmp_path / f"consistent_{index}.npy"
+        image.save(image_path)
+        np.save(depth_path, depth)
+        samples.append(
+            CorridorSample(
+                image_path=str(image_path),
+                depth_path=str(depth_path),
+                class_index=0,
+                session_name="session",
+                stamp=1.0 + index * 0.25,
+            )
+        )
+    dataset = CorridorMultiInputDataset(
+        samples,
+        [224, 224],
+        {
+            "sequence_length": 3,
+            "use_depth": True,
+            "depth_min_m": 0.1,
+            "depth_max_m": 10.0,
+        },
+        augmentation_config={
+            "sequence_consistent": True,
+            "color_jitter": {
+                "brightness": 0.5,
+                "contrast": 0.5,
+                "saturation": 0.5,
+                "hue": 0.1,
+            },
+            "grayscale_probability": 0.5,
+            "blur_probability": 0.5,
+            "depth_scale_jitter": 0.5,
+        },
+    )
+
+    inputs, _ = dataset[0]
+
+    assert torch.equal(inputs["rgb"][0], inputs["rgb"][1])
+    assert torch.equal(inputs["rgb"][1], inputs["rgb"][2])
+    assert torch.equal(inputs["depth"][0], inputs["depth"][1])
+    assert torch.equal(inputs["depth"][1], inputs["depth"][2])
 
 
 def test_passage_direction_targets_mask_turning_samples(tmp_path):

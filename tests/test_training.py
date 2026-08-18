@@ -12,6 +12,7 @@ from corridor_classifier.training import (
     last_blocks_for_epoch,
     learning_rate_multiplier,
     parameter_groups,
+    passage_direction_sampling_weights,
     run_epoch,
     run_passage_epoch,
     sequence_sampling_weights,
@@ -37,6 +38,29 @@ def test_sequence_sampling_weights_favor_rare_classes_and_sessions():
     )
 
     assert weights[-1] > weights[0]
+    assert torch.isclose(weights.mean(), torch.tensor(1.0, dtype=torch.double))
+
+
+def test_passage_direction_sampling_favors_rare_open_direction():
+    class_names = [
+        "straight_road",
+        "dead_end",
+        "corner_right",
+        "corner_left",
+        "cross_road",
+        "3_way_right",
+        "3_way_center",
+        "3_way_left",
+        "turning",
+    ]
+    weights = passage_direction_sampling_weights(
+        labels=[0, 0, 0, 0, 3, 8],
+        class_names=class_names,
+        maximum_direction_factor=2.0,
+    )
+
+    assert weights[4] > weights[0]
+    assert weights[5] == weights[0]
     assert torch.isclose(weights.mean(), torch.tensor(1.0, dtype=torch.double))
 
 

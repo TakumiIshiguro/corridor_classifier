@@ -14,6 +14,11 @@ from torch.optim import Adam, AdamW, SGD
 from torch.optim.lr_scheduler import LambdaLR
 from tqdm.auto import tqdm
 
+from corridor_classifier.passage_directions import (
+    passage_label_counts,
+    passage_target_from_index,
+)
+
 
 def set_random_seed(seed: int) -> None:
     random.seed(int(seed))
@@ -68,6 +73,46 @@ def sequence_sampling_weights(
         )
         weights.append(class_factor * session_factor)
     result = torch.tensor(weights, dtype=torch.double)
+    return result / result.mean()
+
+
+def passage_direction_sampling_weights(
+    labels: Sequence[int],
+    class_names: Sequence[str],
+    turning_class_name: str = "turning",
+    maximum_direction_factor: float = 2.0,
+) -> torch.Tensor:
+    if not labels:
+        raise ValueError("labels must be non-empty")
+    counts = passage_label_counts(
+        labels,
+        class_names,
+        turning_class_name,
+    )
+    positive = torch.as_tensor(
+        counts["direction_positive"],
+        dtype=torch.float64,
+    )
+    available = positive > 0
+    direction_factors = torch.ones(3, dtype=torch.float64)
+    if available.any():
+        largest = positive[available].max()
+        direction_factors[available] = torch.sqrt(
+            largest / positive[available]
+        ).clamp(max=float(maximum_direction_factor))
+    weights = []
+    for label in labels:
+        target = passage_target_from_index(
+            label,
+            class_names,
+            turning_class_name,
+        )
+        positive_directions = target["directions"].bool()
+        if bool(target["direction_mask"]) and positive_directions.any():
+            weights.append(float(direction_factors[positive_directions].max()))
+        else:
+            weights.append(1.0)
+    result = torch.as_tensor(weights, dtype=torch.double)
     return result / result.mean()
 
 
@@ -602,11 +647,13 @@ def save_checkpoint(
                 key: model_config[key]
                 for key in (
                     "sequence_length",
+                    "dino_readout",
                     "frame_stride",
                     "maximum_gap_seconds",
                     "use_depth",
                     "use_gru",
                     "depth_feature_dim",
+                    "depth_pool_size",
                     "depth_min_m",
                     "depth_max_m",
                     "fusion_dim",

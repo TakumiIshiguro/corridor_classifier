@@ -10,6 +10,7 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms
+from torchvision.transforms import functional as transform_functional
 
 from corridor_classifier.models import depth_to_tensor
 from corridor_classifier.passage_directions import passage_target_from_index
@@ -195,29 +196,32 @@ class CorridorMultiInputDataset(Dataset):
         self.depth_min_m = float(variant_config.get("depth_min_m", 0.1))
         self.depth_max_m = float(variant_config.get("depth_max_m", 10.0))
         augmentation = dict(augmentation_config or {})
+        self.sequence_consistent_augmentation = bool(
+            augmentation.get("sequence_consistent", False)
+        )
         self.horizontal_flip_probability = float(
             augmentation.get("horizontal_flip_probability", 0.0)
         )
+        self.rgb_dropout_probability = float(
+            augmentation.get("rgb_dropout_probability", 0.0)
+        )
+        if not 0.0 <= self.rgb_dropout_probability <= 1.0:
+            raise ValueError("rgb_dropout_probability must be in [0, 1]")
         self.depth_scale_jitter = float(
             augmentation.get("depth_scale_jitter", 0.0)
         )
         color_jitter = augmentation.get("color_jitter", {})
-        self.rgb_augmentation = transforms.Compose(
-            [
-                transforms.ColorJitter(
-                    brightness=float(color_jitter.get("brightness", 0.0)),
-                    contrast=float(color_jitter.get("contrast", 0.0)),
-                    saturation=float(color_jitter.get("saturation", 0.0)),
-                    hue=float(color_jitter.get("hue", 0.0)),
-                ),
-                transforms.RandomGrayscale(
-                    p=float(augmentation.get("grayscale_probability", 0.0))
-                ),
-                transforms.RandomApply(
-                    [transforms.GaussianBlur(kernel_size=3)],
-                    p=float(augmentation.get("blur_probability", 0.0)),
-                ),
-            ]
+        self.color_jitter = transforms.ColorJitter(
+            brightness=float(color_jitter.get("brightness", 0.0)),
+            contrast=float(color_jitter.get("contrast", 0.0)),
+            saturation=float(color_jitter.get("saturation", 0.0)),
+            hue=float(color_jitter.get("hue", 0.0)),
+        )
+        self.grayscale_probability = float(
+            augmentation.get("grayscale_probability", 0.0)
+        )
+        self.blur_probability = float(
+            augmentation.get("blur_probability", 0.0)
         )
         self.transform = transforms.Compose(
             [
@@ -263,7 +267,56 @@ class CorridorMultiInputDataset(Dataset):
     def __len__(self):
         return len(self.sequences)
 
-    def _load_rgb(self, sample: CorridorSample):
+    def _sample_rgb_augmentation(self):
+        fn_indices, brightness, contrast, saturation, hue = (
+            transforms.ColorJitter.get_params(
+                self.color_jitter.brightness,
+                self.color_jitter.contrast,
+                self.color_jitter.saturation,
+                self.color_jitter.hue,
+            )
+        )
+        return {
+            "fn_indices": tuple(int(index) for index in fn_indices),
+            "brightness": brightness,
+            "contrast": contrast,
+            "saturation": saturation,
+            "hue": hue,
+            "grayscale": random.random() < self.grayscale_probability,
+            "blur_sigma": (
+                random.uniform(0.1, 2.0)
+                if random.random() < self.blur_probability
+                else None
+            ),
+        }
+
+    @staticmethod
+    def _augment_rgb(image: Image.Image, parameters: dict) -> Image.Image:
+        operations = (
+            (transform_functional.adjust_brightness, parameters["brightness"]),
+            (transform_functional.adjust_contrast, parameters["contrast"]),
+            (transform_functional.adjust_saturation, parameters["saturation"]),
+            (transform_functional.adjust_hue, parameters["hue"]),
+        )
+        for index in parameters["fn_indices"]:
+            operation, value = operations[index]
+            if value is not None:
+                image = operation(image, value)
+        if parameters["grayscale"]:
+            image = transform_functional.rgb_to_grayscale(
+                image,
+                num_output_channels=3,
+            )
+        if parameters["blur_sigma"] is not None:
+            sigma = float(parameters["blur_sigma"])
+            image = transform_functional.gaussian_blur(
+                image,
+                kernel_size=[3, 3],
+                sigma=[sigma, sigma],
+            )
+        return image
+
+    def _load_rgb(self, sample: CorridorSample, augmentation_parameters=None):
         with Image.open(sample.image_path) as image:
             image = image.convert("RGB")
             expected = (self.input_size[1], self.input_size[0])
@@ -272,23 +325,52 @@ class CorridorMultiInputDataset(Dataset):
                     f"dataset image must be {expected}, got {image.size}: "
                     f"{sample.image_path}"
                 )
-            return self.transform(self.rgb_augmentation(image))
+            parameters = (
+                self._sample_rgb_augmentation()
+                if augmentation_parameters is None
+                else augmentation_parameters
+            )
+            return self.transform(self._augment_rgb(image, parameters))
 
     def __getitem__(self, index):
         sequence = self.sequences[index]
         flip = random.random() < self.horizontal_flip_probability
+        rgb_augmentation = (
+            self._sample_rgb_augmentation()
+            if self.sequence_consistent_augmentation
+            else None
+        )
         inputs = {
             "rgb": torch.stack(
-                [self._load_rgb(sample) for sample in sequence]
+                [
+                    self._load_rgb(sample, rgb_augmentation)
+                    for sample in sequence
+                ]
             )
         }
+        if (
+            self.rgb_dropout_probability > 0.0
+            and random.random() < self.rgb_dropout_probability
+        ):
+            inputs["rgb"].zero_()
         if self.use_depth:
+            sequence_depth_scale = (
+                random.uniform(
+                    1.0 - self.depth_scale_jitter,
+                    1.0 + self.depth_scale_jitter,
+                )
+                if self.sequence_consistent_augmentation
+                and self.depth_scale_jitter > 0.0
+                else None
+            )
             inputs["depth"] = torch.stack(
                 [
                     depth_to_tensor(
                         np.load(sample.depth_path, allow_pickle=False)
                         * (
-                            random.uniform(
+                            sequence_depth_scale
+                            if sequence_depth_scale is not None
+                            else random.uniform(
                                 1.0 - self.depth_scale_jitter,
                                 1.0 + self.depth_scale_jitter,
                             )

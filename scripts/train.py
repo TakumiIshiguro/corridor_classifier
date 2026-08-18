@@ -34,6 +34,7 @@ from corridor_classifier.training import (
     create_optimizer,
     create_scheduler,
     last_blocks_for_epoch,
+    passage_direction_sampling_weights,
     run_epoch,
     run_passage_epoch,
     save_checkpoint,
@@ -112,7 +113,22 @@ def main():
     generator = torch.Generator().manual_seed(training["seed"])
     sampling_strategy = str(training.get("sampling_strategy", "shuffle"))
     sampler = None
-    if sampling_strategy == "class_session_inverse_sqrt":
+    if sampling_strategy == "passage_direction_inverse_sqrt":
+        sampling_weights = passage_direction_sampling_weights(
+            [sequence[-1].class_index for sequence in train_dataset.sequences],
+            model_config["class_names"],
+            model_config["turning_class_name"],
+            maximum_direction_factor=float(
+                training.get("maximum_sampling_direction_factor", 2.0)
+            ),
+        )
+        sampler = WeightedRandomSampler(
+            sampling_weights,
+            num_samples=len(train_dataset),
+            replacement=True,
+            generator=generator,
+        )
+    elif sampling_strategy == "class_session_inverse_sqrt":
         sampling_weights = sequence_sampling_weights(
             [sequence[-1].class_index for sequence in train_dataset.sequences],
             [sequence[-1].session_name for sequence in train_dataset.sequences],
@@ -180,15 +196,27 @@ def main():
         maximum_positive_weight = float(
             training.get("maximum_positive_weight", 5.0)
         )
+        maximum_direction_positive_weight = float(
+            training.get(
+                "maximum_direction_positive_weight",
+                maximum_positive_weight,
+            )
+        )
+        maximum_turning_positive_weight = float(
+            training.get(
+                "maximum_turning_positive_weight",
+                maximum_positive_weight,
+            )
+        )
         direction_pos_weight = inverse_frequency_positive_weights(
             passage_counts["direction_positive"],
             passage_counts["direction_negative"],
-            maximum_positive_weight,
+            maximum_direction_positive_weight,
         ).to(device)
         turning_pos_weight = inverse_frequency_positive_weights(
             [passage_counts["turning_positive"]],
             [passage_counts["turning_negative"]],
-            maximum_positive_weight,
+            maximum_turning_positive_weight,
         ).to(device)[0]
         criterion = PassageDirectionLoss(
             direction_pos_weight=direction_pos_weight,

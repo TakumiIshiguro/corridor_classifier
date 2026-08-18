@@ -24,6 +24,25 @@ class FakeDinoFeatures(nn.Module):
     def forward(self, images):
         return self.projection(images.mean(dim=(-2, -1)))
 
+    def get_intermediate_layers(
+        self,
+        images,
+        n,
+        return_prefix_tokens=False,
+        norm=False,
+    ):
+        base = self.forward(images)
+        outputs = []
+        for index in range(int(n)):
+            patch_tokens = base.unsqueeze(1).repeat(1, 4, 1) + index
+            prefix_tokens = base.unsqueeze(1) + index
+            outputs.append(
+                (patch_tokens, prefix_tokens)
+                if return_prefix_tokens
+                else patch_tokens
+            )
+        return outputs
+
 
 class FakeDinoClassifier(nn.Module):
     def __init__(self):
@@ -82,6 +101,41 @@ def test_passage_direction_model_returns_separate_heads():
     assert model.classifier is None
 
 
+@pytest.mark.parametrize(
+    "dino_readout,expected_rgb_dim",
+    [
+        ("last_cls", 12),
+        ("last_cls_patch_mean", 24),
+        ("last4_cls", 48),
+        ("last4_cls_patch_mean", 60),
+    ],
+)
+def test_dino_readout_controls_fusion_input_dimension(
+    dino_readout, expected_rgb_dim
+):
+    model = MultimodalCorridorModel(
+        dino=FakeDinoFeatures(),
+        num_classes=9,
+        use_depth=True,
+        use_gru=True,
+        depth_feature_dim=8,
+        fusion_dim=10,
+        gru_hidden_size=7,
+        output_mode="passage_directions",
+        dino_readout=dino_readout,
+    )
+
+    outputs = model(
+        {
+            "rgb": torch.randn(2, 3, 3, 32, 32),
+            "depth": torch.randn(2, 3, 2, 32, 32),
+        }
+    )
+
+    assert model.fusion[0].normalized_shape == (expected_rgb_dim + 8,)
+    assert outputs["direction_logits"].shape == (2, 3)
+
+
 def test_depth_tensor_contains_log_depth_and_validity_mask():
     depth = np.asarray([[0.1, 1.0], [10.0, np.nan]], dtype=np.float32)
     tensor = depth_to_tensor(depth, 0.1, 10.0)
@@ -90,6 +144,30 @@ def test_depth_tensor_contains_log_depth_and_validity_mask():
     assert tensor[0, 0, 0] == pytest.approx(0.0)
     assert tensor[0, 1, 0] == pytest.approx(1.0)
     assert torch.equal(tensor[1], torch.tensor([[1.0, 1.0], [1.0, 0.0]]))
+
+
+def test_depth_pool_preserves_configured_spatial_grid_before_projection():
+    model = MultimodalCorridorModel(
+        dino=FakeDinoFeatures(),
+        num_classes=9,
+        use_depth=True,
+        use_gru=True,
+        depth_feature_dim=8,
+        depth_pool_size=4,
+        fusion_dim=10,
+        gru_hidden_size=7,
+        output_mode="passage_directions",
+    )
+
+    outputs = model(
+        {
+            "rgb": torch.randn(2, 3, 3, 32, 32),
+            "depth": torch.randn(2, 3, 2, 32, 32),
+        }
+    )
+
+    assert model.depth_encoder.projection.in_features == 128 * 4 * 4
+    assert outputs["direction_logits"].shape == (2, 3)
 
 
 def test_predictor_waits_for_full_strided_context(monkeypatch):

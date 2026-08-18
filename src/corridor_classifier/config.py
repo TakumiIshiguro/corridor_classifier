@@ -95,6 +95,19 @@ def _validate_config(config: Dict[str, Any]) -> None:
             "model.output_mode must be class or passage_directions"
         )
     model["output_mode"] = output_mode
+    dino_readout = str(model.get("dino_readout", "last_cls")).strip().lower()
+    valid_dino_readouts = (
+        "last_cls",
+        "last_cls_patch_mean",
+        "last4_cls",
+        "last4_cls_patch_mean",
+    )
+    if dino_readout not in valid_dino_readouts:
+        raise ValueError(
+            "model.dino_readout must be one of "
+            + ", ".join(valid_dino_readouts)
+        )
+    model["dino_readout"] = dino_readout
     if output_mode == "passage_directions":
         missing_passage_classes = [
             name for name in CLASS_TO_DIRECTIONS if name not in class_names
@@ -164,10 +177,13 @@ def _validate_config(config: Dict[str, Any]) -> None:
         model["depth_feature_dim"] = int(
             model.get("depth_feature_dim", 128)
         )
+        model["depth_pool_size"] = int(model.get("depth_pool_size", 1))
         if not 0.0 < model["depth_min_m"] < model["depth_max_m"]:
             raise ValueError("depth range must satisfy 0 < min < max")
         if model["depth_feature_dim"] <= 0:
             raise ValueError("model.depth_feature_dim must be positive")
+        if model["depth_pool_size"] <= 0:
+            raise ValueError("model.depth_pool_size must be positive")
     if architecture != "rgb":
         model["fusion_dim"] = int(model.get("fusion_dim", 256))
         if model["fusion_dim"] <= 0:

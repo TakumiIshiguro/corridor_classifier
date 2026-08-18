@@ -8,7 +8,7 @@ ROS Noetic用の、DINOv2による単眼カメラ画像の通路形状分類パ�
 
 - Backbone: DINOv2 ViT-S/14 (`vit_small_patch14_dinov2.lvd142m`)
 - Input: RGB and optional UniDepth metric depth, 224 x 224
-- Output: configurable 9-class logits or passage-direction/turning logits
+- Output: configurable 9-class logits or front/left/right passage-direction logits
 - Default inference rate: 4 Hz
 
 クラスの順序は次のとおりです。
@@ -26,12 +26,12 @@ ROS Noetic用の、DINOv2による単眼カメラ画像の通路形状分類パ�
 `model.output_mode`は次の2方式を選択できます。
 
 - `class`: 従来の9クラス排他的分類
-- `passage_directions`: `front`、`left`、`right`の独立3 logitsと、独立した
-  `turning` logit
+- `passage_directions`: `front`、`left`、`right`の独立3 logits（turningは予測しない）
 
 `passage_directions`では既存9クラスラベルを読み込み時に3方向へ変換します。
-`turning`サンプルでは通路方向が曖昧なため方向lossをmaskし、turning headだけを
-学習します。データセット自体の作り直しは不要です。
+`turning`サンプルは通路方向が曖昧なため、学習データから完全に除外します
+（`turning`クラスへの分類はこのモデルの責務ではなく、上位のナビゲーション
+スタックが別の信号（例: 走行中の角速度指令）から判定する前提です）。
 
 入力画像はカメラの視野全体を残すため、アスペクト比を維持せず224 x 224へ
 リサイズします。学習時も同じ前処理を使用してください。
@@ -61,16 +61,16 @@ ROS Noetic用の、DINOv2による単眼カメラ画像の通路形状分類パ�
 | Topic | Type | Description |
 | --- | --- | --- |
 | `/passage_type` | `scenario_navigation_msgs/cmd_dir_intersection` | Predicted class |
-| `/corridor_classifier/probabilities` | `std_msgs/Float32MultiArray` | Class probabilities, or `[front, left, right, turning]` |
+| `/corridor_classifier/probabilities` | `std_msgs/Float32MultiArray` | Class probabilities, or `[front, left, right]` |
 
 `/passage_type`では、`intersection_name`にクラス名、
-`intersection_label`は既存メッセージとの互換性のため8要素のままです。通路形状
-クラスでは従来のone-hotを設定し、`turning`では全要素を0にして
-`intersection_name=turning`を設定します。分類ノードは
-方向指令を生成しないため、`cmd_dir`は常に`[0, 0, 0]`です。
-`passage_directions`では閾値処理後の3方向から従来の8形状名とone-hotを復元する
-ため、既存の`/passage_type`利用側との互換性を維持します。turning判定を優先し、
-turning中は従来どおり8要素one-hotをすべて0にします。
+`intersection_label`は既存メッセージとの互換性のため8要素のままです。分類
+ノードは方向指令を生成しないため、`cmd_dir`は常に`[0, 0, 0]`です。
+`passage_directions`では閾値処理後の3方向から従来の8形状名とone-hotを復元
+し、既存の`/passage_type`利用側との互換性を維持します。このモデルは
+turningを予測しないため、`intersection_name`が`turning`になることはあり
+ません。旋回中かどうかを扱う利用側は、走行中の角速度指令など別の信号を
+参照してください。
 
 トピック名は`config/topics.yaml`で変更できます。
 
@@ -239,7 +239,7 @@ learning rateを表示します。
 roslaunch corridor_classifier train.launch
 ```
 
-3方向multi-label + turning headを新しいbagデータセットで学習する設定は次です。
+3方向multi-labelを新しいbagデータセットで学習する設定は次です。
 
 ```bash
 roslaunch corridor_classifier train.launch \
@@ -260,9 +260,10 @@ roslaunch corridor_classifier train.launch \
 この設定はseed 1を使用し、DINOv2 backboneを全epoch固定します。head学習率
 `2e-5`、2 epochの
 warmup、正例重み上限`2.0`を使います。判定閾値は`front=0.25`、
-`left=0.70`、`right=0.70`、`turning=0.60`です。checkpointは方向3出力と
-turningを同じ重みで平均した`test_passage_macro_f1`が最大のepochを保存します。
-閾値を再評価する場合は次を実行します。
+`left=0.70`、`right=0.70`です。turningラベルの付いたフレームは学習データ
+から除外し、モデルはturningを予測しません。checkpointは3方向macro-F1
+（`test_passage_macro_f1`、`direction_macro_f1`と同値）が最大のepochを
+保存します。閾値を再評価する場合は次を実行します。
 
 ```bash
 python3 scripts/tune_passage_thresholds.py \
@@ -300,8 +301,8 @@ runs/corridor_classifier/<architecture>/metrics.csv
 ```
 
 各checkpointは`training.checkpoint_metric`で指定した指標が最良のモデルです。
-3方向方式では方向別F1、3方向macro-F1、3方向完全一致率、turning F1/accuracy、
-および4出力の`passage_macro_f1`を記録します。最終epochは対応する
+3方向方式では方向別F1、3方向macro-F1、3方向完全一致率、および
+`passage_macro_f1`（3方向macro-F1と同値）を記録します。最終epochは対応する
 `*_final.pth`へ保存します。
 
 ## Build

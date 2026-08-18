@@ -164,6 +164,21 @@ def test_invalid_dino_readout_is_rejected():
         _validate_config(config)
 
 
+def test_regional_dino_readout_is_accepted():
+    config_dir = os.path.join(package_root(), "config")
+    model_data = load_yaml(os.path.join(config_dir, "model.yaml"))
+    config = {
+        "model": deepcopy(model_data["model"]),
+        "runtime": deepcopy(model_data["runtime"]),
+        "topics": load_yaml(os.path.join(config_dir, "topics.yaml")),
+    }
+    config["model"]["dino_readout"] = "last_cls_regional3"
+
+    _validate_config(config)
+
+    assert config["model"]["dino_readout"] == "last_cls_regional3"
+
+
 def test_invalid_depth_pool_size_is_rejected():
     config_dir = os.path.join(package_root(), "config")
     model_data = load_yaml(os.path.join(config_dir, "model.yaml"))

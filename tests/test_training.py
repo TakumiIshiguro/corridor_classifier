@@ -54,13 +54,12 @@ def test_passage_direction_sampling_favors_rare_open_direction():
         "turning",
     ]
     weights = passage_direction_sampling_weights(
-        labels=[0, 0, 0, 0, 3, 8],
+        labels=[0, 0, 0, 0, 3],
         class_names=class_names,
         maximum_direction_factor=2.0,
     )
 
     assert weights[4] > weights[0]
-    assert weights[5] == weights[0]
     assert torch.isclose(weights.mean(), torch.tensor(1.0, dtype=torch.double))
 
 
@@ -224,52 +223,35 @@ def test_run_epoch_accepts_dictionary_inputs():
     assert metrics["loss"] > 0.0
 
 
-def test_passage_loss_masks_directions_while_turning():
+def test_passage_loss_computes_direction_bce():
     direction_logits = torch.randn(2, 3, requires_grad=True)
-    turning_logits = torch.randn(2, requires_grad=True)
     criterion = PassageDirectionLoss()
     loss = criterion(
-        {
-            "direction_logits": direction_logits,
-            "turning_logits": turning_logits,
-        },
-        {
-            "directions": torch.zeros(2, 3),
-            "direction_mask": torch.zeros(2),
-            "turning": torch.ones(2),
-        },
+        {"direction_logits": direction_logits},
+        {"directions": torch.tensor([[1.0, 0.0, 0.0], [0.0, 1.0, 1.0]])},
     )
 
     loss.backward()
 
-    assert torch.equal(direction_logits.grad, torch.zeros_like(direction_logits))
-    assert torch.any(turning_logits.grad != 0.0)
+    assert torch.any(direction_logits.grad != 0.0)
 
 
 class DictionaryPassageModel(nn.Module):
     def __init__(self):
         super().__init__()
         self.direction_head = nn.Linear(3, 3)
-        self.turning_head = nn.Linear(3, 1)
 
     def forward(self, inputs):
         features = inputs["rgb"].mean(dim=(-2, -1))
-        return {
-            "direction_logits": self.direction_head(features),
-            "turning_logits": self.turning_head(features).squeeze(-1),
-        }
+        return {"direction_logits": self.direction_head(features)}
 
 
-def test_run_passage_epoch_reports_direction_and_turning_metrics():
+def test_run_passage_epoch_reports_direction_metrics():
     model = DictionaryPassageModel()
     dataset = [
         (
             {"rgb": torch.randn(3, 2, 2)},
-            {
-                "directions": torch.tensor([1.0, index % 2, 0.0]),
-                "direction_mask": torch.tensor(float(index != 3)),
-                "turning": torch.tensor(float(index == 3)),
-            },
+            {"directions": torch.tensor([1.0, index % 2, 0.0])},
         )
         for index in range(4)
     ]
@@ -280,14 +262,11 @@ def test_run_passage_epoch_reports_direction_and_turning_metrics():
         criterion=PassageDirectionLoss(),
         device=torch.device("cpu"),
         direction_thresholds=[0.5, 0.5, 0.5],
-        turning_threshold=0.5,
     )
 
     assert metrics["loss"] > 0.0
     assert 0.0 <= metrics["direction_macro_f1"] <= 1.0
     assert 0.0 <= metrics["direction_exact_accuracy"] <= 1.0
-    assert 0.0 <= metrics["turning_f1"] <= 1.0
-    expected = (
-        3.0 * metrics["direction_macro_f1"] + metrics["turning_f1"]
-    ) / 4.0
-    assert metrics["passage_macro_f1"] == pytest.approx(expected)
+    assert metrics["passage_macro_f1"] == pytest.approx(
+        metrics["direction_macro_f1"]
+    )

@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import torch
@@ -11,6 +13,7 @@ from corridor_classifier.models import (
     RGBModel,
     depth_to_tensor,
     load_model_checkpoint,
+    regional_patch_features,
 )
 
 
@@ -20,6 +23,8 @@ class FakeDinoFeatures(nn.Module):
     def __init__(self):
         super().__init__()
         self.projection = nn.Linear(3, self.num_features)
+        # 4 patch tokens arranged as a 1x4 grid (one row, four columns).
+        self.patch_embed = SimpleNamespace(grid_size=(1, 4))
 
     def forward(self, images):
         return self.projection(images.mean(dim=(-2, -1)))
@@ -35,6 +40,9 @@ class FakeDinoFeatures(nn.Module):
         outputs = []
         for index in range(int(n)):
             patch_tokens = base.unsqueeze(1).repeat(1, 4, 1) + index
+            # Make each of the 4 patch columns distinguishable so regional
+            # pooling tests can assert that different columns are used.
+            patch_tokens = patch_tokens + torch.arange(4).view(1, 4, 1)
             prefix_tokens = base.unsqueeze(1) + index
             outputs.append(
                 (patch_tokens, prefix_tokens)
@@ -97,7 +105,6 @@ def test_passage_direction_model_returns_separate_heads():
     )
 
     assert outputs["direction_logits"].shape == (2, 3)
-    assert outputs["turning_logits"].shape == (2,)
     assert model.classifier is None
 
 
@@ -108,6 +115,7 @@ def test_passage_direction_model_returns_separate_heads():
         ("last_cls_patch_mean", 24),
         ("last4_cls", 48),
         ("last4_cls_patch_mean", 60),
+        ("last_cls_regional3", 48),
     ],
 )
 def test_dino_readout_controls_fusion_input_dimension(
@@ -134,6 +142,34 @@ def test_dino_readout_controls_fusion_input_dimension(
 
     assert model.fusion[0].normalized_shape == (expected_rgb_dim + 8,)
     assert outputs["direction_logits"].shape == (2, 3)
+
+
+def test_regional_readout_preserves_left_right_distinction():
+    dino = FakeDinoFeatures()
+    patch_tokens = torch.zeros(1, 4, FakeDinoFeatures.num_features)
+    # Columns are tagged 0..3 by FakeDinoFeatures; tensor_split(3) groups the
+    # 1x4 grid into bands of sizes 2, 1, 1.
+    patch_tokens += torch.arange(4).view(1, 4, 1)
+
+    regional = regional_patch_features(dino, patch_tokens, rows=1, columns=3)
+
+    num_features = FakeDinoFeatures.num_features
+    assert regional.shape == (1, 3 * num_features)
+    left, center, right = regional.split(num_features, dim=-1)
+    assert torch.allclose(left, torch.full_like(left, 0.5))  # mean of columns 0,1
+    assert torch.allclose(center, torch.full_like(center, 2.0))  # column 2
+    assert torch.allclose(right, torch.full_like(right, 3.0))  # column 3
+    assert not torch.allclose(left, right)
+
+
+def test_regional_readout_requires_patch_embed_grid_size():
+    dino = FakeDinoFeatures()
+    del dino.patch_embed
+
+    with pytest.raises(ValueError, match="patch_embed"):
+        regional_patch_features(
+            dino, torch.zeros(1, 4, FakeDinoFeatures.num_features), rows=1, columns=3
+        )
 
 
 def test_depth_tensor_contains_log_depth_and_validity_mask():
@@ -236,8 +272,6 @@ def test_predictor_decodes_passage_direction_heads(monkeypatch):
     with torch.no_grad():
         model.direction_classifier.weight.zero_()
         model.direction_classifier.bias.copy_(torch.tensor([10.0, -10.0, 10.0]))
-        model.turning_classifier.weight.zero_()
-        model.turning_classifier.bias.fill_(-10.0)
     monkeypatch.setattr(
         "corridor_classifier.models.create_corridor_model",
         lambda config: model,
@@ -269,8 +303,6 @@ def test_predictor_decodes_passage_direction_heads(monkeypatch):
             "maximum_gap_seconds": 0.4,
             "use_depth": False,
             "direction_thresholds": [0.5, 0.5, 0.5],
-            "turning_threshold": 0.5,
-            "turning_class_name": "turning",
         },
         "unused.pth",
     )
@@ -280,7 +312,6 @@ def test_predictor_decodes_passage_direction_heads(monkeypatch):
     assert isinstance(prediction, PassagePrediction)
     assert prediction.open_directions == (1, 0, 1)
     assert prediction.class_name == "3_way_right"
-    assert prediction.is_turning is False
 
 
 def test_legacy_rgb_checkpoint_is_loaded(tmp_path):

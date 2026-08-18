@@ -30,13 +30,12 @@ def binary_f1(predictions, targets):
     return 0.0 if denominator == 0 else 2.0 * true_positive / denominator
 
 
-def metrics(direction_probabilities, direction_targets, turning_probabilities, turning_targets, thresholds):
-    direction_predictions = direction_probabilities >= thresholds[:3]
+def metrics(direction_probabilities, direction_targets, thresholds):
+    direction_predictions = direction_probabilities >= thresholds
     direction_f1 = [
         binary_f1(direction_predictions[:, index], direction_targets[:, index])
         for index in range(3)
     ]
-    turning_predictions = turning_probabilities >= thresholds[3]
     return {
         "front_f1": direction_f1[0],
         "left_f1": direction_f1[1],
@@ -44,10 +43,6 @@ def metrics(direction_probabilities, direction_targets, turning_probabilities, t
         "direction_macro_f1": sum(direction_f1) / 3.0,
         "direction_exact_accuracy": float(
             (direction_predictions == direction_targets).all(dim=1).float().mean()
-        ),
-        "turning_f1": binary_f1(turning_predictions, turning_targets),
-        "turning_accuracy": float(
-            (turning_predictions == turning_targets).float().mean()
         ),
     }
 
@@ -96,23 +91,16 @@ def main():
 
     direction_probabilities = []
     direction_targets = []
-    turning_probabilities = []
-    turning_targets = []
     with torch.inference_mode():
         for inputs, targets in loader:
             inputs = {key: value.to(device, non_blocking=True) for key, value in inputs.items()}
             with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=device.type == "cuda"):
                 outputs = model(inputs)
-            mask = targets["direction_mask"].bool()
-            direction_probabilities.append(torch.sigmoid(outputs["direction_logits"]).cpu()[mask])
-            direction_targets.append(targets["directions"].bool()[mask])
-            turning_probabilities.append(torch.sigmoid(outputs["turning_logits"]).cpu())
-            turning_targets.append(targets["turning"].bool())
+            direction_probabilities.append(torch.sigmoid(outputs["direction_logits"]).cpu())
+            direction_targets.append(targets["directions"].bool())
 
     direction_probabilities = torch.cat(direction_probabilities)
     direction_targets = torch.cat(direction_targets)
-    turning_probabilities = torch.cat(turning_probabilities)
-    turning_targets = torch.cat(turning_targets)
     step = float(args.threshold_step)
     if not 0.0 < step < 1.0:
         raise ValueError("threshold-step must be between 0 and 1")
@@ -121,17 +109,14 @@ def main():
         best_threshold(direction_probabilities[:, index], direction_targets[:, index], candidates)
         for index in range(3)
     ]
-    tuned.append(best_threshold(turning_probabilities, turning_targets, candidates))
     thresholds = torch.tensor([item[1] for item in tuned])
-    default_thresholds = torch.tensor(
-        list(model_config["direction_thresholds"]) + [model_config["turning_threshold"]]
-    )
+    default_thresholds = torch.tensor(list(model_config["direction_thresholds"]))
     print(f"checkpoint={checkpoint}")
-    print(f"samples=directions:{len(direction_targets)} turning:{len(turning_targets)}")
+    print(f"samples=directions:{len(direction_targets)}")
     print(f"default_thresholds={default_thresholds.tolist()}")
-    print(f"default_metrics={metrics(direction_probabilities, direction_targets, turning_probabilities, turning_targets, default_thresholds)}")
+    print(f"default_metrics={metrics(direction_probabilities, direction_targets, default_thresholds)}")
     print(f"tuned_thresholds={thresholds.tolist()}")
-    print(f"tuned_metrics={metrics(direction_probabilities, direction_targets, turning_probabilities, turning_targets, thresholds)}")
+    print(f"tuned_metrics={metrics(direction_probabilities, direction_targets, thresholds)}")
 
 
 if __name__ == "__main__":

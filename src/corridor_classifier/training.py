@@ -79,16 +79,11 @@ def sequence_sampling_weights(
 def passage_direction_sampling_weights(
     labels: Sequence[int],
     class_names: Sequence[str],
-    turning_class_name: str = "turning",
     maximum_direction_factor: float = 2.0,
 ) -> torch.Tensor:
     if not labels:
         raise ValueError("labels must be non-empty")
-    counts = passage_label_counts(
-        labels,
-        class_names,
-        turning_class_name,
-    )
+    counts = passage_label_counts(labels, class_names)
     positive = torch.as_tensor(
         counts["direction_positive"],
         dtype=torch.float64,
@@ -102,13 +97,9 @@ def passage_direction_sampling_weights(
         ).clamp(max=float(maximum_direction_factor))
     weights = []
     for label in labels:
-        target = passage_target_from_index(
-            label,
-            class_names,
-            turning_class_name,
-        )
+        target = passage_target_from_index(label, class_names)
         positive_directions = target["directions"].bool()
-        if bool(target["direction_mask"]) and positive_directions.any():
+        if positive_directions.any():
             weights.append(float(direction_factors[positive_directions].max()))
         else:
             weights.append(1.0)
@@ -120,9 +111,7 @@ class PassageDirectionLoss(nn.Module):
     def __init__(
         self,
         direction_pos_weight: torch.Tensor = None,
-        turning_pos_weight: torch.Tensor = None,
         direction_loss_weight: float = 1.0,
-        turning_loss_weight: float = 1.0,
     ):
         super().__init__()
         direction_weight = (
@@ -132,50 +121,20 @@ class PassageDirectionLoss(nn.Module):
         )
         if direction_weight.shape != (3,):
             raise ValueError("direction_pos_weight must contain 3 values")
-        turning_weight = (
-            torch.tensor(1.0, dtype=torch.float32)
-            if turning_pos_weight is None
-            else torch.as_tensor(turning_pos_weight, dtype=torch.float32)
-        )
-        if turning_weight.numel() != 1:
-            raise ValueError("turning_pos_weight must contain one value")
         self.register_buffer("direction_pos_weight", direction_weight)
-        self.register_buffer("turning_pos_weight", turning_weight.reshape(()))
         self.direction_loss_weight = float(direction_loss_weight)
-        self.turning_loss_weight = float(turning_loss_weight)
 
     def forward(self, outputs: Dict[str, torch.Tensor], targets: Dict):
         direction_logits = outputs["direction_logits"]
-        turning_logits = outputs["turning_logits"]
         direction_targets = targets["directions"].to(
             dtype=direction_logits.dtype
         )
-        direction_mask = targets["direction_mask"].to(
-            dtype=direction_logits.dtype
-        )
-        turning_targets = targets["turning"].to(dtype=turning_logits.dtype)
-        direction_losses = nn.functional.binary_cross_entropy_with_logits(
+        direction_loss = nn.functional.binary_cross_entropy_with_logits(
             direction_logits,
             direction_targets,
             pos_weight=self.direction_pos_weight,
-            reduction="none",
-        ).mean(dim=1)
-        valid_direction_count = direction_mask.sum()
-        direction_loss = (
-            (direction_losses * direction_mask).sum()
-            / valid_direction_count.clamp_min(1.0)
         )
-        if float(valid_direction_count.detach()) == 0.0:
-            direction_loss = direction_losses.sum() * 0.0
-        turning_loss = nn.functional.binary_cross_entropy_with_logits(
-            turning_logits,
-            turning_targets,
-            pos_weight=self.turning_pos_weight,
-        )
-        return (
-            self.direction_loss_weight * direction_loss
-            + self.turning_loss_weight * turning_loss
-        )
+        return self.direction_loss_weight * direction_loss
 
 
 def last_blocks_for_epoch(
@@ -484,7 +443,6 @@ def run_passage_epoch(
     criterion,
     device,
     direction_thresholds: Sequence[float],
-    turning_threshold: float,
     optimizer=None,
     scheduler=None,
     scaler=None,
@@ -502,11 +460,6 @@ def run_passage_epoch(
     direction_fp = torch.zeros(3, dtype=torch.int64)
     direction_fn = torch.zeros(3, dtype=torch.int64)
     direction_exact_correct = 0
-    direction_samples = 0
-    turning_tp = 0
-    turning_fp = 0
-    turning_fn = 0
-    turning_correct = 0
 
     progress = tqdm(
         loader,
@@ -550,42 +503,24 @@ def run_passage_epoch(
             if scheduler is not None and optimizer_stepped:
                 scheduler.step()
 
-        batch_size = int(targets["turning"].shape[0])
+        direction_targets = targets["directions"].detach().cpu().bool()
+        batch_size = int(direction_targets.shape[0])
         total_loss += float(loss.detach()) * batch_size
         total_samples += batch_size
         direction_predictions = (
             torch.sigmoid(outputs["direction_logits"].detach()).cpu()
             >= thresholds
         )
-        direction_targets = targets["directions"].detach().cpu().bool()
-        direction_mask = targets["direction_mask"].detach().cpu().bool()
-        if direction_mask.any():
-            valid_predictions = direction_predictions[direction_mask]
-            valid_targets = direction_targets[direction_mask]
-            direction_tp += (valid_predictions & valid_targets).sum(dim=0)
-            direction_fp += (valid_predictions & ~valid_targets).sum(dim=0)
-            direction_fn += (~valid_predictions & valid_targets).sum(dim=0)
-            direction_exact_correct += int(
-                (valid_predictions == valid_targets).all(dim=1).sum()
-            )
-            direction_samples += int(direction_mask.sum())
-        turning_predictions = (
-            torch.sigmoid(outputs["turning_logits"].detach()).cpu()
-            >= float(turning_threshold)
+        direction_tp += (direction_predictions & direction_targets).sum(dim=0)
+        direction_fp += (direction_predictions & ~direction_targets).sum(dim=0)
+        direction_fn += (~direction_predictions & direction_targets).sum(dim=0)
+        direction_exact_correct += int(
+            (direction_predictions == direction_targets).all(dim=1).sum()
         )
-        turning_targets = targets["turning"].detach().cpu().bool()
-        turning_tp += int((turning_predictions & turning_targets).sum())
-        turning_fp += int((turning_predictions & ~turning_targets).sum())
-        turning_fn += int((~turning_predictions & turning_targets).sum())
-        turning_correct += int((turning_predictions == turning_targets).sum())
         progress.set_postfix(
             {
                 "loss": f"{total_loss / total_samples:.4f}",
-                "dir_exact": (
-                    f"{direction_exact_correct / direction_samples:.3f}"
-                    if direction_samples
-                    else "n/a"
-                ),
+                "dir_exact": f"{direction_exact_correct / total_samples:.3f}",
             }
         )
 
@@ -600,21 +535,14 @@ def run_passage_epoch(
         for index in range(3)
     ]
     direction_macro_f1 = sum(direction_f1) / len(direction_f1)
-    turning_f1 = _binary_f1(turning_tp, turning_fp, turning_fn)
     return {
         "loss": total_loss / total_samples,
         "direction_front_f1": direction_f1[0],
         "direction_left_f1": direction_f1[1],
         "direction_right_f1": direction_f1[2],
         "direction_macro_f1": direction_macro_f1,
-        "direction_exact_accuracy": (
-            direction_exact_correct / direction_samples
-            if direction_samples
-            else 0.0
-        ),
-        "turning_f1": turning_f1,
-        "turning_accuracy": turning_correct / total_samples,
-        "passage_macro_f1": (3.0 * direction_macro_f1 + turning_f1) / 4.0,
+        "direction_exact_accuracy": direction_exact_correct / total_samples,
+        "passage_macro_f1": direction_macro_f1,
     }
 
 
@@ -662,7 +590,6 @@ def save_checkpoint(
                     "direction_names",
                     "direction_thresholds",
                     "turning_class_name",
-                    "turning_threshold",
                 )
                 if key in model_config
             },
@@ -708,8 +635,6 @@ class MetricsWriter:
         "train_direction_right_f1",
         "train_direction_macro_f1",
         "train_direction_exact_accuracy",
-        "train_turning_f1",
-        "train_turning_accuracy",
         "train_passage_macro_f1",
         "test_loss",
         "test_direction_front_f1",
@@ -717,8 +642,6 @@ class MetricsWriter:
         "test_direction_right_f1",
         "test_direction_macro_f1",
         "test_direction_exact_accuracy",
-        "test_turning_f1",
-        "test_turning_accuracy",
         "test_passage_macro_f1",
     )
 

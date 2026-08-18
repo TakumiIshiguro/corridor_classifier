@@ -24,20 +24,90 @@ from corridor_classifier.passage_directions import (
 
 
 ARCHITECTURES = ("rgb", "rgb_gru", "rgb_depth", "rgb_depth_gru")
+# (readout_layers, append_patch_mean, regional_grid=(rows, columns))
 DINO_READOUTS = {
-    "last_cls": (1, False),
-    "last_cls_patch_mean": (1, True),
-    "last4_cls": (4, False),
-    "last4_cls_patch_mean": (4, True),
+    "last_cls": (1, False, (0, 0)),
+    "last_cls_patch_mean": (1, True, (0, 0)),
+    "last4_cls": (4, False, (0, 0)),
+    "last4_cls_patch_mean": (4, True, (0, 0)),
+    # Averages the last layer's patch tokens within left/center/right image
+    # columns instead of collapsing them into one global vector. DINOv2's
+    # dense-prediction evaluations (segmentation/depth) read out spatially
+    # arranged patch tokens rather than the CLS token because patch tokens
+    # carry spatially localized semantics; this mirrors that for a task
+    # (front/left/right passage direction) that is inherently about which
+    # image region is open.
+    "last_cls_regional3": (1, False, (1, 3)),
+    "last_cls_regional5": (1, False, (1, 5)),
+    "last_cls_regional3x2": (1, False, (2, 3)),
 }
+
+
+def regional_patch_features(
+    dino: nn.Module, patch_tokens: torch.Tensor, rows: int, columns: int
+) -> torch.Tensor:
+    """Average-pools the last layer's patch tokens within a `rows` x
+    `columns` grid of image bands, preserving which region of the image each
+    feature came from instead of collapsing all patches into one vector.
+    """
+    if not hasattr(dino, "patch_embed"):
+        raise ValueError("DINO model must expose patch_embed for regional readouts")
+    grid_height, grid_width = dino.patch_embed.grid_size
+    batch_size, num_patches, channels = patch_tokens.shape
+    if num_patches != grid_height * grid_width:
+        raise ValueError(
+            "patch token count does not match patch_embed.grid_size: "
+            f"{num_patches} != {grid_height}x{grid_width}"
+        )
+    grid = patch_tokens.reshape(batch_size, grid_height, grid_width, channels)
+    region_means = []
+    for row_band in grid.tensor_split(int(rows), dim=1):
+        for cell in row_band.tensor_split(int(columns), dim=2):
+            region_means.append(cell.reshape(batch_size, -1, channels).mean(dim=1))
+    return torch.cat(region_means, dim=-1)
+
+
+def encode_dino_readout(
+    dino: nn.Module, rgb: torch.Tensor, dino_readout: str
+) -> torch.Tensor:
+    if dino_readout == "last_cls":
+        return dino(rgb)
+    if dino_readout not in DINO_READOUTS:
+        raise ValueError(f"unsupported DINO readout: {dino_readout}")
+    if not hasattr(dino, "get_intermediate_layers"):
+        raise ValueError(
+            f"DINO model must expose get_intermediate_layers for readout {dino_readout}"
+        )
+    readout_layers, append_patch_mean, regional_grid = DINO_READOUTS[dino_readout]
+    outputs = dino.get_intermediate_layers(
+        rgb,
+        n=readout_layers,
+        return_prefix_tokens=True,
+        norm=True,
+    )
+    class_features = torch.cat(
+        [prefix_tokens[:, 0] for _, prefix_tokens in outputs],
+        dim=-1,
+    )
+    features = [class_features]
+    if append_patch_mean:
+        features.append(outputs[-1][0].mean(dim=1))
+    regional_rows, regional_columns = regional_grid
+    if regional_rows > 0 and regional_columns > 0:
+        features.append(
+            regional_patch_features(
+                dino, outputs[-1][0], regional_rows, regional_columns
+            )
+        )
+    if len(features) == 1:
+        return features[0]
+    return torch.cat(features, dim=-1)
 
 
 @dataclass(frozen=True)
 class PassagePrediction:
     direction_probabilities: tuple
     open_directions: tuple
-    turning_probability: float
-    is_turning: bool
     class_name: str
 
 
@@ -110,9 +180,12 @@ class MultimodalCorridorModel(nn.Module):
             raise ValueError(f"unsupported output_mode: {self.output_mode}")
         if self.dino_readout not in DINO_READOUTS:
             raise ValueError(f"unsupported DINO readout: {self.dino_readout}")
-        readout_layers, append_patch_mean = DINO_READOUTS[self.dino_readout]
+        readout_layers, append_patch_mean, regional_grid = DINO_READOUTS[
+            self.dino_readout
+        ]
+        regional_cells = int(regional_grid[0]) * int(regional_grid[1])
         rgb_dim = int(getattr(dino, "num_features")) * (
-            readout_layers + int(append_patch_mean)
+            readout_layers + int(append_patch_mean) + regional_cells
         )
         self.depth_encoder = (
             DepthEncoder(depth_feature_dim, depth_pool_size)
@@ -138,11 +211,9 @@ class MultimodalCorridorModel(nn.Module):
             classifier_dim = int(fusion_dim)
         if self.output_mode == "passage_directions":
             self.direction_classifier = nn.Linear(classifier_dim, 3)
-            self.turning_classifier = nn.Linear(classifier_dim, 1)
             self.classifier = None
         else:
             self.direction_classifier = None
-            self.turning_classifier = None
             self.classifier = nn.Linear(classifier_dim, int(num_classes))
 
     def encode_frames(
@@ -163,30 +234,7 @@ class MultimodalCorridorModel(nn.Module):
         return self.fusion(torch.cat(features, dim=-1))
 
     def _encode_rgb(self, rgb: torch.Tensor) -> torch.Tensor:
-        if self.dino_readout == "last_cls":
-            return self.dino(rgb)
-        if not hasattr(self.dino, "get_intermediate_layers"):
-            raise ValueError(
-                "DINO model must expose get_intermediate_layers for "
-                f"readout {self.dino_readout}"
-            )
-        readout_layers, append_patch_mean = DINO_READOUTS[
-            self.dino_readout
-        ]
-        outputs = self.dino.get_intermediate_layers(
-            rgb,
-            n=readout_layers,
-            return_prefix_tokens=True,
-            norm=True,
-        )
-        class_features = torch.cat(
-            [prefix_tokens[:, 0] for _, prefix_tokens in outputs],
-            dim=-1,
-        )
-        if not append_patch_mean:
-            return class_features
-        patch_mean = outputs[-1][0].mean(dim=1)
-        return torch.cat((class_features, patch_mean), dim=-1)
+        return encode_dino_readout(self.dino, rgb, self.dino_readout)
 
     def classify_features(self, fused: torch.Tensor) -> torch.Tensor:
         if fused.ndim == 2:
@@ -195,10 +243,7 @@ class MultimodalCorridorModel(nn.Module):
             fused, _ = self.gru(fused)
         features = fused[:, -1]
         if self.output_mode == "passage_directions":
-            return {
-                "direction_logits": self.direction_classifier(features),
-                "turning_logits": self.turning_classifier(features).squeeze(-1),
-            }
+            return {"direction_logits": self.direction_classifier(features)}
         return self.classifier(features)
 
     def forward(self, inputs: Dict[str, torch.Tensor]) -> torch.Tensor:
@@ -334,12 +379,6 @@ class CorridorPredictor:
             float(value)
             for value in model_config.get("direction_thresholds", [0.5] * 3)
         )
-        self.turning_threshold = float(
-            model_config.get("turning_threshold", 0.5)
-        )
-        self.turning_class_name = str(
-            model_config.get("turning_class_name", "turning")
-        )
         self.device = resolve_device(model_config.get("device", "auto"))
         self.use_fp16 = bool(model_config.get("use_fp16", True)) and (
             self.device.type == "cuda"
@@ -447,9 +486,6 @@ class CorridorPredictor:
                 direction_probabilities = torch.sigmoid(
                     logits["direction_logits"].float()
                 )[0]
-                turning_probability = torch.sigmoid(
-                    logits["turning_logits"].float()
-                )[0]
             else:
                 probabilities = torch.softmax(logits.float(), dim=1)[0]
         if self.output_mode == "passage_directions":
@@ -460,19 +496,10 @@ class CorridorPredictor:
             open_directions = threshold_directions(
                 direction_values, self.direction_thresholds
             )
-            turning_value = float(turning_probability.cpu())
-            is_turning = turning_value >= self.turning_threshold
-            class_name = (
-                self.turning_class_name
-                if is_turning
-                else class_name_from_directions(open_directions)
-            )
             return PassagePrediction(
                 direction_probabilities=direction_values,
                 open_directions=open_directions,
-                turning_probability=turning_value,
-                is_turning=is_turning,
-                class_name=class_name,
+                class_name=class_name_from_directions(open_directions),
             )
         values = tuple(float(value) for value in probabilities.cpu().tolist())
         index = int(torch.argmax(probabilities))

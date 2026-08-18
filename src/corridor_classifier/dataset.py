@@ -23,6 +23,7 @@ class CorridorSample:
     session_name: str
     stamp: float = 0.0
     depth_path: Optional[str] = None
+    bev_path: Optional[str] = None
 
 
 def session_directories(dataset_dir: str) -> List[str]:
@@ -71,6 +72,14 @@ def load_session_samples(
                 raise FileNotFoundError(
                     f"dataset depth map was not found: {depth_path}"
                 )
+            bev_filename = str(row.get("bev_filename", "") or "").strip()
+            bev_path = (
+                os.path.join(session_dir, bev_filename) if bev_filename else None
+            )
+            if bev_path is not None and not os.path.isfile(bev_path):
+                raise FileNotFoundError(
+                    f"dataset BEV scan was not found: {bev_path}"
+                )
             samples.append(
                 CorridorSample(
                     image_path=image_path,
@@ -78,6 +87,7 @@ def load_session_samples(
                     session_name=os.path.basename(session_dir),
                     stamp=float(row.get("stamp", 0.0) or 0.0),
                     depth_path=depth_path,
+                    bev_path=bev_path,
                 )
             )
     if not samples:
@@ -193,6 +203,16 @@ class CorridorMultiInputDataset(Dataset):
             raise ValueError(
                 "passage_directions output requires configured class_names"
             )
+        self._excluded_turning_index = None
+        if self.output_mode == "passage_directions":
+            if self.turning_class_name not in self.class_names:
+                raise ValueError(
+                    "turning_class_name must exist in class_names: "
+                    f"{self.turning_class_name}"
+                )
+            self._excluded_turning_index = self.class_names.index(
+                self.turning_class_name
+            )
         self.depth_min_m = float(variant_config.get("depth_min_m", 0.1))
         self.depth_max_m = float(variant_config.get("depth_max_m", 10.0))
         augmentation = dict(augmentation_config or {})
@@ -254,6 +274,8 @@ class CorridorMultiInputDataset(Dataset):
                 if self.use_depth and any(
                     sample.depth_path is None for sample in sequence
                 ):
+                    continue
+                if sequence[-1].class_index == self._excluded_turning_index:
                     continue
                 self.sequences.append(tuple(sequence))
         if not self.sequences:
@@ -391,9 +413,5 @@ class CorridorMultiInputDataset(Dataset):
             }
             label = {2: 3, 3: 2, 5: 7, 7: 5}.get(label, label)
         if self.output_mode == "passage_directions":
-            return inputs, passage_target_from_index(
-                label,
-                self.class_names,
-                self.turning_class_name,
-            )
+            return inputs, passage_target_from_index(label, self.class_names)
         return inputs, label

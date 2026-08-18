@@ -191,41 +191,19 @@ def main():
         passage_counts = passage_label_counts(
             [sequence[-1].class_index for sequence in train_dataset.sequences],
             model_config["class_names"],
-            model_config["turning_class_name"],
-        )
-        maximum_positive_weight = float(
-            training.get("maximum_positive_weight", 5.0)
         )
         maximum_direction_positive_weight = float(
-            training.get(
-                "maximum_direction_positive_weight",
-                maximum_positive_weight,
-            )
-        )
-        maximum_turning_positive_weight = float(
-            training.get(
-                "maximum_turning_positive_weight",
-                maximum_positive_weight,
-            )
+            training.get("maximum_positive_weight", 5.0)
         )
         direction_pos_weight = inverse_frequency_positive_weights(
             passage_counts["direction_positive"],
             passage_counts["direction_negative"],
             maximum_direction_positive_weight,
         ).to(device)
-        turning_pos_weight = inverse_frequency_positive_weights(
-            [passage_counts["turning_positive"]],
-            [passage_counts["turning_negative"]],
-            maximum_turning_positive_weight,
-        ).to(device)[0]
         criterion = PassageDirectionLoss(
             direction_pos_weight=direction_pos_weight,
-            turning_pos_weight=turning_pos_weight,
             direction_loss_weight=float(
                 training.get("direction_loss_weight", 1.0)
-            ),
-            turning_loss_weight=float(
-                training.get("turning_loss_weight", 1.0)
             ),
         ).to(device)
         evaluation_criterion = PassageDirectionLoss().to(device)
@@ -291,11 +269,7 @@ def main():
     print(f"train sequence class counts={train_sequence_counts}")
     if output_mode == "passage_directions":
         print(f"passage label counts={passage_counts}")
-        print(
-            "positive weights="
-            f"directions={direction_pos_weight.cpu().tolist()} "
-            f"turning={float(turning_pos_weight.cpu()):.4f}"
-        )
+        print(f"positive weights=directions={direction_pos_weight.cpu().tolist()}")
     else:
         print(f"loss class weights={class_weights.cpu().tolist()}")
     print(f"sampling strategy={sampling_strategy}")
@@ -379,7 +353,6 @@ def main():
                     direction_thresholds=model_config[
                         "direction_thresholds"
                     ],
-                    turning_threshold=model_config["turning_threshold"],
                     **common_train_arguments,
                 )
             else:
@@ -396,9 +369,6 @@ def main():
                         device=device,
                         direction_thresholds=model_config[
                             "direction_thresholds"
-                        ],
-                        turning_threshold=model_config[
-                            "turning_threshold"
                         ],
                         use_amp=use_amp,
                         description=f"test {epoch}/{training['epochs']}",
@@ -473,7 +443,6 @@ def main():
             if output_mode == "passage_directions":
                 message += (
                     f"train_dir_f1={train_metrics['direction_macro_f1']:.4f} "
-                    f"train_turn_f1={train_metrics['turning_f1']:.4f} "
                 )
             else:
                 message += f"train_acc={train_metrics['accuracy']:.4f} "
@@ -485,8 +454,7 @@ def main():
                 message += f" test_loss={test_metrics['loss']:.6f} "
                 if output_mode == "passage_directions":
                     message += (
-                        f"test_dir_f1={test_metrics['direction_macro_f1']:.4f} "
-                        f"test_turn_f1={test_metrics['turning_f1']:.4f}"
+                        f"test_dir_f1={test_metrics['direction_macro_f1']:.4f}"
                     )
                 else:
                     message += (

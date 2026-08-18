@@ -101,6 +101,9 @@ def _validate_config(config: Dict[str, Any]) -> None:
         "last_cls_patch_mean",
         "last4_cls",
         "last4_cls_patch_mean",
+        "last_cls_regional3",
+        "last_cls_regional5",
+        "last_cls_regional3x2",
     )
     if dino_readout not in valid_dino_readouts:
         raise ValueError(
@@ -139,15 +142,11 @@ def _validate_config(config: Dict[str, Any]) -> None:
             raise ValueError(
                 "model.turning_class_name must exist in model.class_names"
             )
-        turning_threshold = float(model.get("turning_threshold", 0.5))
-        if not 0.0 < turning_threshold < 1.0:
-            raise ValueError("model.turning_threshold must be in (0, 1)")
         model.update(
             {
                 "direction_names": list(DIRECTION_NAMES),
                 "direction_thresholds": direction_thresholds,
                 "turning_class_name": turning_class_name,
-                "turning_threshold": turning_threshold,
             }
         )
     model["sequence_length"] = int(model.get("sequence_length", 1))

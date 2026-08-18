@@ -1,0 +1,41 @@
+model:
+  architecture: rgb_depth_gru
+  output_mode: passage_directions
+  model_name: vit_small_patch14_dinov2.lvd142m
+  input_size: [224, 224]
+  num_classes: 9
+  class_names:
+    - straight_road
+    - dead_end
+    - corner_right
+    - corner_left
+    - cross_road
+    - 3_way_right
+    - 3_way_center
+    - 3_way_left
+    - turning
+  direction_names: [front, left, right]
+  direction_thresholds: [0.25, 0.70, 0.70]
+  turning_class_name: turning
+  device: auto
+  use_fp16: true
+  strict_checkpoint: true
+  dino_readout: last_cls_regional3
+  variants:
+    rgb_depth_gru:
+      checkpoint_path: weights/experiments/rgb_depth_gru_bags_passage_directions_regional3_depth_pool4_no_turning_seed0/model.pth
+      sequence_length: 3
+      frame_stride: 4
+      maximum_gap_seconds: 0.4
+      use_depth: true
+      use_gru: true
+      depth_feature_dim: 128
+      depth_pool_size: 4
+      fusion_dim: 256
+      gru_hidden_size: 256
+      gru_num_layers: 1
+      depth_min_m: 0.1
+      depth_max_m: 10.0
+
+runtime:
+  inference_rate: 4.0

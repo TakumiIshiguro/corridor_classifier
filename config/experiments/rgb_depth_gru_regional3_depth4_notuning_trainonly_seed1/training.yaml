@@ -1,0 +1,47 @@
+dataset:
+  train_data_dir: dataset/corridor/bags_turning/train
+  train_session_names: [a_f]
+  test_data_dir: dataset/corridor/bags_turning/train
+  test_session_names: [g, h]
+  train_sequence_step: 4
+  test_sequence_step: 4
+  num_workers: 4
+
+training:
+  epochs: 16
+  batch_size: 8
+  use_test: true
+  use_amp: true
+  seed: 1
+  freeze_backbone_epochs: 16
+  unfreeze_schedule: []
+  pretrained_weights_path: weights/dinov2_vits14_pretrain.pth
+  run_root: runs/experiments/rgb_depth_gru_bags_passage_directions_regional3_depth4_notuning_trainonly_seed1
+  checkpoint_metric: test_passage_macro_f1
+  maximum_positive_weight: 2.0
+  direction_loss_weight: 1.0
+  turning_loss_weight: 1.0
+  augmentation:
+    horizontal_flip_probability: 0.5
+    color_jitter:
+      brightness: 0.35
+      contrast: 0.35
+      saturation: 0.25
+      hue: 0.04
+    grayscale_probability: 0.1
+    blur_probability: 0.15
+    depth_scale_jitter: 0.15
+
+optimizer:
+  name: adamw
+  head_learning_rate: 0.00002
+  backbone_learning_rate: 0.000001
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+  epsilon: 1.0e-8
+
+scheduler:
+  name: cosine
+  warmup_epochs: 2
+  warmup_start_factor: 0.1
+  min_learning_rate_ratio: 0.1

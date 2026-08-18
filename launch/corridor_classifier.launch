@@ -1,6 +1,10 @@
 <?xml version="1.0"?>
 <launch>
-  <arg name="config_dir" default="$(find corridor_classifier)/config"/>
+  <!-- Trained on sessions a-h only; i-n are intentionally never used for
+       fitting or checkpoint selection, so they remain available as a
+       genuine unseen-environment check. See
+       config/experiments/TRAIN_ONLY_SESSIONS_DECISION.md. -->
+  <arg name="config_dir" default="$(find corridor_classifier)/config/experiments/production_gru_trainonly"/>
   <arg name="checkpoint_path_override" default=""/>
   <arg name="device_override" default=""/>
   <arg name="inference_rate_override" default="0.0"/>

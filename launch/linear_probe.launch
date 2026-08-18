@@ -1,0 +1,44 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- Trained on sessions a-h only; i-n are intentionally never used for
+       fitting or hyperparameter selection, so they remain available as a
+       genuine unseen-environment check. See
+       config/experiments/TRAIN_ONLY_SESSIONS_DECISION.md. -->
+  <arg name="checkpoint_path" default="$(find corridor_classifier)/weights/production/linear_probe_regional5_trainonly.pth"/>
+  <arg name="device_override" default="auto"/>
+  <arg name="image_topic" default="/camera_center/image_raw"/>
+  <arg name="depth_topic" default="/unidepth/depth"/>
+  <arg name="passage_type_topic" default="/passage_type"/>
+  <arg name="probabilities_topic" default="/corridor_classifier/probabilities"/>
+  <arg name="inference_rate" default="4.0"/>
+  <!-- While |cmd_vel.angular.z| >= this threshold, inference is skipped
+       entirely and /passage_type publishes "turning" instead, since the
+       model is not trained to classify passage shape mid-turn. -->
+  <arg name="cmd_vel_topic" default="/cmd_vel"/>
+  <arg name="turning_angular_speed_threshold_rad_s" default="0.20"/>
+  <arg name="turning_stale_timeout_seconds" default="1.0"/>
+  <!-- A direction only flips in /passage_type once the raw per-frame
+       prediction disagrees with the current output for this many
+       consecutive frames, since the robot's travel speed means the
+       correct output should hold for several frames in a row. -->
+  <arg name="direction_confirm_frames" default="2"/>
+
+  <node
+    pkg="corridor_classifier"
+    type="linear_probe_node.py"
+    name="corridor_classifier_linear_probe"
+    output="screen"
+    required="true">
+    <param name="checkpoint_path" value="$(arg checkpoint_path)"/>
+    <param name="device_override" value="$(arg device_override)"/>
+    <param name="image_topic" value="$(arg image_topic)"/>
+    <param name="depth_topic" value="$(arg depth_topic)"/>
+    <param name="passage_type_topic" value="$(arg passage_type_topic)"/>
+    <param name="probabilities_topic" value="$(arg probabilities_topic)"/>
+    <param name="inference_rate" value="$(arg inference_rate)"/>
+    <param name="cmd_vel_topic" value="$(arg cmd_vel_topic)"/>
+    <param name="turning_angular_speed_threshold_rad_s" value="$(arg turning_angular_speed_threshold_rad_s)"/>
+    <param name="turning_stale_timeout_seconds" value="$(arg turning_stale_timeout_seconds)"/>
+    <param name="direction_confirm_frames" value="$(arg direction_confirm_frames)"/>
+  </node>
+</launch>

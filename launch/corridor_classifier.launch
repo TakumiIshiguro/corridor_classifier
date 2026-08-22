@@ -8,6 +8,53 @@
   <arg name="checkpoint_path_override" default=""/>
   <arg name="device_override" default=""/>
   <arg name="inference_rate_override" default="0.0"/>
+  <!-- While |cmd_vel.angular.z| >= this threshold, inference is skipped
+       entirely and /passage_type publishes "turning" instead, since the
+       model is not trained to classify passage shape mid-turn. 0.20 was
+       too high to ever trigger under vnm_ros/CARE driving: measured
+       /cmd_vel.angular.z peaked around 0.10-0.15 rad/s during real turns
+       there (vs. scenario_navigation's more abrupt, larger commanded
+       turns). 0.08 leaves some margin below that measured range. -->
+  <arg name="cmd_vel_topic" default="/cmd_vel"/>
+  <arg name="turning_angular_speed_threshold_rad_s" default="0.08"/>
+  <arg name="turning_stale_timeout_seconds" default="1.0"/>
+  <!-- vnm_ros CARE's obstacle-avoidance-active topic (std_msgs/Bool). While
+       it publishes true, CARE's own repulsive steering is never mistaken
+       for a scenario turn, even if it briefly exceeds
+       turning_angular_speed_threshold_rad_s. Harmless when vnm_ros/CARE is
+       not running: with no publisher on this topic, turning detection
+       falls back to cmd_vel alone. Set to "" to disable explicitly. -->
+  <arg name="care_avoidance_topic" default="/vnm/care_avoidance_active"/>
+  <!-- scenario_navigation's cmd_dir_executor publishes the intersection
+       labels (comma-separated, std_msgs/String) that currently satisfy the
+       active scenario step's target. A raw prediction matching one of them
+       can bypass direction_confirm_frames' hold (after
+       direction_min_confirm_frames below), so the target is never missed
+       or badly delayed by an unrelated switch's hold period. Harmless
+       when scenario_navigation is not running: with no publisher on this
+       topic, the debouncer behaves exactly as if this were disabled. Set
+       to "" to disable explicitly. -->
+  <arg name="scenario_target_labels_topic" default="/scenario_target_labels"/>
+  <!-- A candidate value (see direction_min_confirm_frames below) is held
+       for this many frames before another switch is accepted (see
+       direction_debouncer.py). NOTE: 32 exceeds the dataset-derived safe
+       upper bound of 31 (the shortest genuine non-turning run in
+       dataset/corridor/bags_turning, sessions a-n, that is immediately
+       followed by turning), so in principle a real segment that short
+       could be held through and never reflected in the output; chosen
+       anyway as a deliberate stability/responsiveness tradeoff. -->
+  <arg name="direction_confirm_frames" default="32"/>
+  <!-- A raw prediction must be seen this many consecutive frames before it
+       can switch /passage_type at all (even the very first switch, e.g.
+       right after a turn resets the debouncer), so a single noisy frame
+       can never alone become the published value. It also still needs
+       this much evidence before it can bypass the hold above when it
+       matches scenario_target_labels_topic's current target, so a single
+       noisy frame cannot alone make scenario_navigation advance a step,
+       either. Deliberately much smaller than direction_confirm_frames:
+       the point is rejecting single-frame noise, not making transitions
+       wait as long as the hold. -->
+  <arg name="direction_min_confirm_frames" default="3"/>
 
   <node
     pkg="corridor_classifier"
@@ -19,5 +66,12 @@
     <param name="checkpoint_path_override" value="$(arg checkpoint_path_override)"/>
     <param name="device_override" value="$(arg device_override)"/>
     <param name="inference_rate_override" value="$(arg inference_rate_override)"/>
+    <param name="cmd_vel_topic" value="$(arg cmd_vel_topic)"/>
+    <param name="turning_angular_speed_threshold_rad_s" value="$(arg turning_angular_speed_threshold_rad_s)"/>
+    <param name="turning_stale_timeout_seconds" value="$(arg turning_stale_timeout_seconds)"/>
+    <param name="care_avoidance_topic" value="$(arg care_avoidance_topic)"/>
+    <param name="scenario_target_labels_topic" value="$(arg scenario_target_labels_topic)"/>
+    <param name="direction_confirm_frames" value="$(arg direction_confirm_frames)"/>
+    <param name="direction_min_confirm_frames" value="$(arg direction_min_confirm_frames)"/>
   </node>
 </launch>

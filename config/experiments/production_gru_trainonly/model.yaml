@@ -15,7 +15,12 @@ model:
     - 3_way_left
     - turning
   direction_names: [front, left, right]
-  direction_thresholds: [0.25, 0.70, 0.70]
+  # Thresholds tuned via scripts/tune_passage_thresholds.py on g,h no
+  # longer apply: g,h are now part of the training set below (see
+  # checkpoint_path), so evaluating thresholds on them would be leakage.
+  # Flat 0.5 until a leak-free way to retune is decided (i-n is
+  # deliberately not used for this -- "spend held-out data once").
+  direction_thresholds: [0.5, 0.5, 0.5]
   turning_class_name: turning
   device: auto
   use_fp16: true
@@ -23,10 +28,21 @@ model:
   dino_readout: last_cls_regional3
   variants:
     rgb_depth_gru:
-      checkpoint_path: weights/production/gru_regional3_depth4_trainonly.pth
+      # Trained on all of a-h (a_f + g + h combined; see
+      # config/experiments/rgb_depth_gru_regional3_depth4_notuning_full_ah).
+      # The previous checkpoint trained on a_f only, with g/h held out as
+      # an in-training validation split, meant the model never saw a
+      # single dead_end example (dead_end happens to be concentrated in
+      # g/h; a_f alone has zero).
+      checkpoint_path: weights/production/gru_regional3_depth4_full_ah.pth
       sequence_length: 3
       frame_stride: 4
-      maximum_gap_seconds: 0.4
+      # At 4 Hz inference (0.25 s period), 0.4 s tolerated essentially zero
+      # missed frames before discarding the GRU's temporal buffer, forcing a
+      # full 9-frame (~2.25 s) recollection after any brief camera/publish
+      # hiccup, not just after a real turn. Widen the margin so a couple of
+      # dropped frames don't trigger an unnecessary reset.
+      maximum_gap_seconds: 0.8
       use_depth: true
       use_gru: true
       depth_feature_dim: 128

@@ -1,6 +1,6 @@
 import pytest
 
-from corridor_classifier.turning_gate import is_turning
+from corridor_classifier.turning_gate import combine_turning_signals, is_turning
 
 
 @pytest.mark.parametrize(
@@ -16,3 +16,20 @@ from corridor_classifier.turning_gate import is_turning
 )
 def test_is_turning_thresholds_absolute_angular_speed(angular_z, threshold, expected):
     assert is_turning(angular_z, threshold) is expected
+
+
+@pytest.mark.parametrize(
+    "cmd_vel_turning,care_avoidance_active,expected",
+    [
+        (False, False, False),
+        (True, False, True),
+        (False, True, False),
+        (True, True, False),
+    ],
+)
+def test_combine_turning_signals_suppresses_care_avoidance(
+    cmd_vel_turning, care_avoidance_active, expected
+):
+    assert (
+        combine_turning_signals(cmd_vel_turning, care_avoidance_active) is expected
+    )

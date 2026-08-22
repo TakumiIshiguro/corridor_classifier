@@ -2,52 +2,100 @@ from typing import Hashable, List, Optional, Sequence
 
 
 class ConsecutiveConfirmDebouncer:
-    """Holds a stable output and only accepts a new value once it has been
-    seen for ``confirm_frames`` consecutive updates in a row.
+    """Holds a stable output tuple. A disagreeing raw tuple must be seen
+    for at least ``min_confirm_frames`` consecutive updates before it can
+    switch at all, and then it is held for at least ``confirm_frames``
+    updates before accepting another switch.
 
-    This is deliberately not a moving average or majority vote over a
-    window: given the robot's travel speed, the correct output is expected
-    to hold for several consecutive frames, so a single frame that
-    disagrees with an otherwise stable stream is more likely to be noise
-    than a genuine transition. Averaging/voting over a fixed window was
-    measured to slightly *hurt* accuracy (see
-    scripts/compare_temporal_smoothing.py); requiring sustained agreement
-    before switching is a different mechanism aimed at output stability,
-    not at improving per-frame accuracy.
+    Earlier versions of this debouncer required either a long run of
+    ``confirm_frames`` consecutive matching updates before switching, or
+    switched on a single disagreeing frame with no evidence at all. Both
+    turned out to be problems in practice: the long-confirmation version
+    made every genuine transition lag by up to ``confirm_frames`` frames,
+    while the zero-evidence version could lock onto a single noisy
+    misclassification (most visibly right after a reset, e.g. just after a
+    turn, when a single bad frame would otherwise immediately become the
+    published value for the entire next hold period). ``min_confirm_frames``
+    is deliberately much smaller than ``confirm_frames``: it exists to
+    reject single-frame noise, not to make transitions wait for
+    ``confirm_frames`` like the old design did.
 
-    Each position in the sequence is debounced independently (e.g. one
-    slot per front/left/right direction), so a change in one direction
-    does not reset the confirmation count of the others.
+    A raw value can also be marked high-priority via ``update(...,
+    bypass_hold=True)`` (e.g. it matches what a downstream consumer such as
+    scenario_navigation is currently waiting for). Once it has the same
+    ``min_confirm_frames`` worth of evidence, it switches immediately
+    instead of waiting out an unrelated, lower-priority switch's
+    ``confirm_frames`` hold.
+
+    The whole tuple is debounced atomically: every slot switches together
+    based on the complete raw tuple, not slot by slot. Debouncing each slot
+    independently was tried first, but let each slot switch at a different
+    time, so the published tuple could pass through combinations the model
+    never actually predicted at any single instant (e.g. flickering
+    through several intersection class names in a row while the raw
+    per-frame prediction never changed), which downstream consumers such
+    as scenario_navigation could misread as several distinct real
+    transitions happening at once.
     """
 
-    def __init__(self, initial: Sequence[Hashable], confirm_frames: int = 2):
+    def __init__(
+        self,
+        initial: Sequence[Hashable],
+        confirm_frames: int = 2,
+        min_confirm_frames: int = 3,
+    ):
         if confirm_frames < 1:
             raise ValueError("confirm_frames must be at least 1")
+        if min_confirm_frames < 1:
+            raise ValueError("min_confirm_frames must be at least 1")
         self.confirm_frames = int(confirm_frames)
+        self.min_confirm_frames = int(min_confirm_frames)
         self._current: List[Hashable] = list(initial)
+        # Start already past the hold period, so the first *confirmed*
+        # candidate after init/reset can switch as soon as it has
+        # min_confirm_frames worth of evidence, without also waiting out
+        # confirm_frames.
+        self._frames_since_switch: int = self.confirm_frames
         self._candidate: List[Hashable] = list(self._current)
-        self._candidate_count: List[int] = [0] * len(self._current)
+        self._candidate_streak: int = 0
 
-    def update(self, values: Sequence[Hashable]) -> List[Hashable]:
+    def update(
+        self, values: Sequence[Hashable], bypass_hold: bool = False
+    ) -> List[Hashable]:
+        """``bypass_hold=True`` marks ``values`` as coming from a
+        high-priority source. Once ``values`` has accumulated
+        ``min_confirm_frames`` worth of evidence, it switches immediately
+        even mid-hold, instead of also waiting out ``confirm_frames``.
+        """
+        values = list(values)
         if len(values) != len(self._current):
             raise ValueError("values length must match the debouncer's slot count")
-        for index, value in enumerate(values):
-            if value == self._current[index]:
-                self._candidate[index] = value
-                self._candidate_count[index] = 0
-                continue
-            if value == self._candidate[index]:
-                self._candidate_count[index] += 1
+        self._frames_since_switch += 1
+
+        if values != self._current:
+            if values == self._candidate:
+                self._candidate_streak += 1
             else:
-                self._candidate[index] = value
-                self._candidate_count[index] = 1
-            if self._candidate_count[index] >= self.confirm_frames:
-                self._current[index] = value
-                self._candidate_count[index] = 0
+                self._candidate = values
+                self._candidate_streak = 1
+        else:
+            self._candidate = list(values)
+            self._candidate_streak = 0
+
+        should_switch = (
+            values != self._current
+            and self._candidate_streak >= self.min_confirm_frames
+            and (bypass_hold or self._frames_since_switch >= self.confirm_frames)
+        )
+        if should_switch:
+            self._current = values
+            self._frames_since_switch = 0
+            self._candidate_streak = 0
         return list(self._current)
 
     def reset(self, initial: Optional[Sequence[Hashable]] = None) -> None:
         if initial is not None:
             self._current = list(initial)
+        self._frames_since_switch = self.confirm_frames
         self._candidate = list(self._current)
-        self._candidate_count = [0] * len(self._current)
+        self._candidate_streak = 0

@@ -13,13 +13,16 @@ class ScenarioTargetLabelsSubscriber:
     """Watches a topic (std_msgs/String, comma-separated intersection_name
     values, e.g. "3_way_center,corner_left") published by
     scenario_navigation's cmd_dir_executor describing which corridor labels
-    currently satisfy the active scenario step's target.
+    currently satisfy the active target. While scenario_navigation is
+    executing a turn step, this looks ahead to the step the turn leads
+    into (see cmd_dir_executor_detailed.cpp's activeTargetLabels()).
 
-    Used so a raw prediction that matches the scenario's actual target can
-    bypass the direction debouncer's hold period immediately (see
-    direction_debouncer.py's ``bypass_hold``), instead of the target being
-    missed or delayed by up to ``confirm_frames`` while an unrelated,
-    lower-priority switch is still being held.
+    Used so that, while turning, a raw prediction matching that lookahead
+    target can be published on /passage_type immediately instead of
+    "turning" (see corridor_classifier_node.py), letting
+    scenario_navigation's turnFinish() complete the step as soon as the
+    destination is visible instead of always waiting for the physical turn
+    (cmd_vel) to settle back down.
 
     Disabled by default (empty topic name): corridor_classifier does not
     require scenario_navigation to be running.
@@ -50,6 +53,6 @@ class ScenarioTargetLabelsSubscriber:
             return False
         if rospy.get_time() - received_at > self.stale_timeout_seconds:
             # No recent scenario state: do not let a stale target set keep
-            # bypassing the hold for a label that may no longer be relevant.
+            # matching a label that may no longer be relevant.
             return False
         return label in labels

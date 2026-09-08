@@ -8,6 +8,15 @@
   <arg name="checkpoint_path_override" default=""/>
   <arg name="device_override" default=""/>
   <arg name="inference_rate_override" default="0.0"/>
+  <!-- Set to true only if nothing else (e.g. vnm_ros/care_navigation.launch)
+       is already publishing /unidepth/depth; defaults to false to avoid
+       starting UniDepth twice. -->
+  <arg name="start_depth_estimator" default="false"/>
+  <arg name="unidepth_config_file"
+       default="$(find unidepth_ros)/config/unidepth.yaml"/>
+  <arg name="unidepth_model_path_override" default=""/>
+  <arg name="unidepth_device_override" default=""/>
+  <arg name="unidepth_inference_rate_override" default="0.0"/>
   <!-- Inference is skipped entirely and /passage_type publishes "turning"
        instead, since the model is not trained to classify passage shape
        mid-turn, whenever BOTH hold: scenario_navigation is commanding
@@ -43,6 +52,13 @@
        on this topic, this stays disabled and turning is always reported
        as "turning". Set to "" to disable explicitly. -->
   <arg name="scenario_target_labels_topic" default="/scenario_target_labels"/>
+
+  <include file="$(find unidepth_ros)/launch/unidepth.launch" if="$(arg start_depth_estimator)">
+    <arg name="config_file" value="$(arg unidepth_config_file)"/>
+    <arg name="model_path_override" value="$(arg unidepth_model_path_override)"/>
+    <arg name="device_override" value="$(arg unidepth_device_override)"/>
+    <arg name="inference_rate_override" value="$(arg unidepth_inference_rate_override)"/>
+  </include>
 
   <node
     pkg="corridor_classifier"

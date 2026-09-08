@@ -315,26 +315,30 @@ source devel/setup.bash
 
 ## Run
 
-今回採用したseed 1のRGB+Depth+GRUモデルは、UniDepthを含む専用launchで
-起動します。`/camera_center/image_raw`を受け取り、4 Hzで
+採用したRGB+Depth+GRUモデル(`config/experiments/production_gru_trainonly`、
+a-h全体で学習、i-nは未知環境チェック用に温存)を使います。
+`/camera_center/image_raw`を受け取り、4 Hzで
 `/passage_type`と`/corridor_classifier/probabilities`をpublishします。
-
-```bash
-roslaunch corridor_classifier passage_directions.launch
-```
-
-すでに別ノードが`/unidepth/depth`をpublishしている場合は、深度推定の重複起動を
-避けます。
-
-```bash
-roslaunch corridor_classifier passage_directions.launch \
-  start_depth_estimator:=false
-```
-
-従来の9クラス分類設定や任意のconfigを使用する場合は、汎用launchを使います。
+`/unidepth/depth`は別ノード(例: `vnm_ros/care_navigation.launch`)が
+publishしている前提で、デフォルトではUniDepthを起動しません。
 
 ```bash
 roslaunch corridor_classifier corridor_classifier.launch
+```
+
+他に`/unidepth/depth`のpublisherがいない場合は、UniDepthも一緒に起動します。
+
+```bash
+roslaunch corridor_classifier corridor_classifier.launch \
+  start_depth_estimator:=true
+```
+
+従来の9クラス分類設定や任意のconfigを使用する場合は、`config_dir`を
+上書きします。
+
+```bash
+roslaunch corridor_classifier corridor_classifier.launch \
+  config_dir:=$(rospack find corridor_classifier)/config
 ```
 
 ## Feature visualization

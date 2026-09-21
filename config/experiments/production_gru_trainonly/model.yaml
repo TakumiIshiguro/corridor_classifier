@@ -34,7 +34,20 @@ model:
       # an in-training validation split, meant the model never saw a
       # single dead_end example (dead_end happens to be concentrated in
       # g/h; a_f alone has zero).
-      checkpoint_path: weights/production/gru_regional3_depth4_full_ah.pth
+      # Retrained 2026-09-12 without any augmentation, matching vnm_ros so
+      # both packages train the same way.
+      #
+      # An a-h -> i-n sweep compared none / flip / photometric /
+      # flip+photometric. Photometric alone did score best here (macro F1
+      # 0.711 vs 0.693 for none and 0.698 for the previous flip+photometric
+      # recipe), but the whole spread was 0.018 macro F1 from a single seed.
+      # Flip never raised macro F1 at all; it only evened out the left/right
+      # F1 asymmetry (0.47/0.72 without it, 0.60/0.61 with it), trading one
+      # side's accuracy for the other's. None is the default because the
+      # differences are small enough not to justify the inconsistency, and
+      # because it is the easiest recipe to reason about. See
+      # config/experiments/cc_aug2_photo to turn photometric back on.
+      checkpoint_path: weights/production/gru_regional3_depth4_noaug.pth
       sequence_length: 3
       frame_stride: 4
       # At 4 Hz inference (0.25 s period), 0.4 s tolerated essentially zero
@@ -55,3 +68,28 @@ model:
 
 runtime:
   inference_rate: 4.0
+  # Inference is skipped entirely and passage_type publishes "turning"
+  # instead, since the model is not trained to classify passage shape
+  # mid-turn, whenever BOTH hold: scenario_navigation is commanding
+  # something other than straight ([1,0,0]) on cmd_dir_topic, AND the
+  # robot's actual cmd_vel.angular.z is at or above this threshold.
+  # cmd_dir alone is not enough (stop, [0,0,0], is "not straight" too but
+  # is not turning); cmd_vel alone is not enough either (vnm_ros/CARE's own
+  # obstacle-avoidance steering can produce a large angular velocity while
+  # scenario_navigation still commands straight); requiring both rules out
+  # CARE without a separate CARE-avoidance signal.
+  #
+  # 0.20 matches the threshold used to label "turning" when building the
+  # training dataset (dataset.yaml's
+  # turn_detection.angular_speed_threshold_rad_s), so runtime and training
+  # agree on what counts as turning. Note it was measured too high to ever
+  # trigger under vnm_ros/CARE driving, where cmd_vel.angular.z peaked
+  # around 0.10-0.15 rad/s during real turns.
+  turning_angular_speed_threshold_rad_s: 0.20
+  turning_stale_timeout_seconds: 1.0
+  # A raw prediction must be seen this many consecutive frames before it
+  # can switch passage_type at all (even the very first switch, e.g. right
+  # after a turn resets the debouncer), so a single noisy frame can never
+  # alone become the published value.
+  direction_min_confirm_frames: 3
+  scenario_target_labels_stale_timeout_seconds: 1.0

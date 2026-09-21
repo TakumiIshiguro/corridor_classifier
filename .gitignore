@@ -6,3 +6,4 @@ dataset/
 runs/
 weights/*
 !weights/README.md
+weights/diagnostics/

@@ -1,0 +1,75 @@
+model:
+  architecture: rgb_bev_gru
+  output_mode: passage_directions
+  # ViT-B/14 with registers instead of ViT-S/14. Kept as a hedge, not as
+  # the recommendation: which size wins depends on how far the model has
+  # to transfer. On the sim unseen area -- same domain, near transfer --
+  # ViT-S leads 0.7608 to 0.6270, while across domains (real training
+  # evaluated on the sim split) it loses 0.6960 to 0.7574. Real training
+  # evaluated on a real unseen area is the near case on paper, so ViT-S is
+  # the default in cc_real_bevwall_ep7, but nothing has measured that
+  # distance directly.
+  model_name: vit_base_patch14_reg4_dinov2.lvd142m
+  input_size:
+  - 224
+  - 224
+  num_classes: 9
+  class_names:
+  - straight_road
+  - dead_end
+  - corner_right
+  - corner_left
+  - cross_road
+  - 3_way_right
+  - 3_way_center
+  - 3_way_left
+  - turning
+  direction_names:
+  - front
+  - left
+  - right
+  direction_thresholds:
+  - 0.5
+  - 0.5
+  - 0.5
+  turning_class_name: turning
+  device: auto
+  use_fp16: true
+  strict_checkpoint: true
+  dino_readout: last_cls_regional3
+  variants:
+    rgb_bev_gru:
+      checkpoint_path: weights/production/real_bevwall_vitb14reg_ep7.pth
+      sequence_length: 3
+      frame_stride: 4
+      maximum_gap_seconds: 0.4
+      use_depth: false
+      # The real grids use a different height band from the sim ones:
+      # 0.18-1.75 m rather than 0.05-1.6 m. The ground plane does not land
+      # in the same place in the two point clouds -- z ~ +0.01 in real
+      # against ~ -0.15 in sim, about 0.16 m apart -- so the sim band
+      # swallows 8.25% floor here. 0.18 restores the same 0.10 m of
+      # clearance above the floor the sim band has. See
+      # UniDepth/unidepth_ros/config/unidepth_real.yaml.
+      use_bev: true
+      bev_manifest_column: bev5m_filename
+      bev_feature_dim: 128
+      bev_pool_size: 4
+      bev_binary: true
+      # 80, matching the sim recipe. Real cells hold far more points than
+      # sim ones (per-cell p50 101 against 22), so this floor bites
+      # harder here: it drops forward reach from 4.71 m to 4.48 m and
+      # removes the far-field mass that distinguishes 3_way_left and
+      # 3_way_right. 20-50 looked better by eye
+      # (runs/bev_inspection/real_bev5m_min_points.png) but there is no
+      # real unseen-area split to choose on, so the sim value stands.
+      bev_min_points: 80
+      # The runtime cloud is flattened to z=0, so the mean-height channel
+      # would be all zeros at inference.
+      bev_drop_height: true
+      use_gru: true
+      fusion_dim: 256
+      gru_hidden_size: 256
+      gru_num_layers: 1
+runtime:
+  inference_rate: 4.0

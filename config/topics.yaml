@@ -4,3 +4,22 @@ label_topic: /cmd_dir_intersection
 passage_type_topic: /passage_type
 probabilities_topic: /corridor_classifier/probabilities
 visualization_topic: /corridor_classifier/visualization
+# Read by the turning gate: a turn is only recognized when
+# scenario_navigation commands a non-straight cmd_dir AND the measured
+# angular velocity crosses runtime.turning_angular_speed_threshold_rad_s.
+cmd_dir_topic: /cmd_dir_intersection
+cmd_vel_topic: /cmd_vel
+# scenario_navigation's cmd_dir_executor publishes the intersection labels
+# (comma-separated, std_msgs/String) that currently satisfy the active
+# target; while a turn step is active it looks ahead to the step the turn
+# leads into. A raw prediction matching one of them while still turning is
+# published immediately instead of "turning". Leave empty to disable --
+# also harmless when nothing publishes the topic.
+scenario_target_labels_topic: ""
+# Robot-frame point cloud for the BEV occupancy grid, published by
+# unidepth_ros from its `bev_projection` bounds. Separate from the CARE
+# clouds vnm_ros consumes: those are cropped to 1 m ahead and
+# obstacle_points is already reduced to the nearest point per lateral bin,
+# while the BEV needs every point out to 5 m. Only read when the loaded
+# checkpoint sets use_bev.
+bev_points_topic: /unidepth/bev_points

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import math
 import os
 import sys
 
@@ -20,6 +21,7 @@ from corridor_classifier.messages import (
 )
 from corridor_classifier.models import CorridorPredictor
 from corridor_classifier.passage_directions import class_name_from_directions
+from corridor_classifier.bev_points import LatestBevGridSubscriber
 from corridor_classifier.scenario_target_labels import ScenarioTargetLabelsSubscriber
 from corridor_classifier.synchronized_subscriber import (
     LatestRgbDepthSubscriber,
@@ -45,6 +47,13 @@ def _apply_ros_overrides(config):
     rate_override = float(rospy.get_param("~inference_rate_override", 0.0))
     if rate_override > 0.0:
         runtime["inference_rate"] = rate_override
+
+    bev_time_override = rospy.get_param("~bev_max_time_difference_seconds", "")
+    if bev_time_override != "":
+        value = float(bev_time_override)
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError("~bev_max_time_difference_seconds must be finite and positive")
+        runtime["bev_max_time_difference_seconds"] = value
 
 
 def main():
@@ -73,7 +82,7 @@ def main():
     # can switch the published value at all (even right after a turn resets
     # the debouncer), so a single noisy frame can never alone become the
     # published value.
-    min_confirm_frames = int(rospy.get_param("~direction_min_confirm_frames", 3))
+    min_confirm_frames = int(runtime["direction_min_confirm_frames"])
     debouncer = (
         ConsecutiveConfirmDebouncer(
             initial=(False, False, False),
@@ -86,35 +95,44 @@ def main():
         )
     )
     turning_gate = CmdDirTurningGate(
-        cmd_dir_topic=str(
-            rospy.get_param("~cmd_dir_topic", "/cmd_dir_intersection")
-        ),
-        cmd_vel_topic=str(rospy.get_param("~cmd_vel_topic", "/cmd_vel")),
-        # 0.20 was too high to ever trigger under vnm_ros/CARE driving:
-        # measured /cmd_vel.angular.z peaked around 0.10-0.15 rad/s during
-        # real turns there (vs. scenario_navigation's more abrupt, larger
-        # commanded turns). 0.20 matches the threshold already used to
-        # label "turning" when building the training dataset (see
-        # config/dataset.yaml's turn_detection.angular_speed_threshold_rad_s),
-        # so runtime and training agree on what counts as turning.
+        cmd_dir_topic=str(topics["cmd_dir_topic"]),
+        cmd_vel_topic=str(topics["cmd_vel_topic"]),
         threshold_rad_s=float(
-            rospy.get_param("~turning_angular_speed_threshold_rad_s", 0.20)
+            runtime["turning_angular_speed_threshold_rad_s"]
         ),
-        stale_timeout_seconds=float(
-            rospy.get_param("~turning_stale_timeout_seconds", 1.0)
-        ),
+        stale_timeout_seconds=float(runtime["turning_stale_timeout_seconds"]),
     )
     # Empty by default (disabled): only set when running alongside
     # scenario_navigation, so a raw prediction matching the destination the
     # active turn step leads into can be published immediately instead of
     # "turning" while still mid-turn (see scenario_target_labels.py).
     scenario_target_labels = ScenarioTargetLabelsSubscriber(
-        topic=str(rospy.get_param("~scenario_target_labels_topic", "")),
+        topic=str(topics["scenario_target_labels_topic"]),
         stale_timeout_seconds=float(
-            rospy.get_param("~scenario_target_labels_stale_timeout_seconds", 1.0)
+            runtime["scenario_target_labels_stale_timeout_seconds"]
         ),
     )
     bridge = CvBridge()
+    # The BEV grid arrives on its own topic rather than being rebuilt here:
+    # unidepth_ros already has the point cloud in robot coordinates, so it
+    # crops to the BEV band (its `bev_projection` block, kept separate from
+    # the CARE bounds vnm_ros uses) and publishes it. Binning is cheap and
+    # happens in the subscriber callback.
+    bev_subscriber = None
+    if classifier.use_bev:
+        bev_topic = str(topics.get("bev_points_topic", "")).strip()
+        if not bev_topic:
+            raise ValueError(
+                "topics.bev_points_topic must be set for a use_bev checkpoint"
+            )
+        bev_grid_config = config["bev_grid"]
+        bev_subscriber = LatestBevGridSubscriber(
+            bev_topic,
+            bev_grid_config["forward_range_m"],
+            bev_grid_config["map_width_m"],
+            bev_grid_config["forward_bins"],
+            bev_grid_config["lateral_bins"],
+        )
     if classifier.use_depth:
         subscriber = LatestRgbDepthSubscriber(
             topics["image_topic"], topics["depth_topic"]
@@ -198,10 +216,45 @@ def main():
         # shape mid-turn (see README.md), so raw turn-time predictions are
         # never treated as the classification result, only shown as-is for
         # visibility.
+        image_stamp = image_msg.header.stamp.to_sec()
+        bev_grid = None
+        if bev_subscriber is not None:
+            bev_grid, bev_stamp = bev_subscriber.latest()
+            if bev_grid is None:
+                classifier.reset()
+                debouncer.reset()
+                rospy.logwarn_throttle(
+                    5.0,
+                    "waiting for the BEV point cloud on "
+                    f"{topics['bev_points_topic']}",
+                )
+                rate.sleep()
+                continue
+
+            # Compare capture times in both directions: a cached cloud
+            # must not outlive its matching RGB frames, including clock resets.
+            if (
+                bev_stamp is None
+                or not math.isfinite(bev_stamp)
+                or not math.isfinite(image_stamp)
+                or abs(image_stamp - bev_stamp) > runtime["bev_max_time_difference_seconds"]
+            ):
+                classifier.reset()
+                debouncer.reset()
+                rospy.logwarn_throttle(
+                    5.0,
+                    "skipping inference: RGB and BEV timestamps are missing "
+                    "or differ by more than "
+                    f"{runtime['bev_max_time_difference_seconds']} seconds",
+                )
+                rate.sleep()
+                continue
+
         prediction = classifier.predict(
             PILImage.fromarray(rgb_image),
             depth_meters=depth_image,
-            stamp=image_msg.header.stamp.to_sec(),
+            stamp=image_stamp,
+            bev_grid=bev_grid,
         )
         if prediction is None:
             if turning:

@@ -96,6 +96,32 @@ drops the depth branch entirely. UniDepth still runs -- the BEV grid is
 built from its point cloud -- but the depth-map CNN over 224x224 is
 replaced by the BEV CNN over 50x70.
 
+## The point-count floor barely matters
+
+`bev_min_points` came across from the pre-fix `cc_bev5m` config and had
+never been swept after the pooling was corrected. It turns out not to be
+a sensitive knob (1 channel, pool 4, 7 epochs, unseen area):
+
+| min_points | macro  | front | left  | right |
+|------------|--------|-------|-------|-------|
+| 5          | 0.7585 | 0.930 | 0.664 | 0.682 |
+| 20         | 0.7689 | 0.931 | 0.633 | 0.743 |
+| 50         | 0.7748 | 0.933 | 0.640 | 0.751 |
+| 80         | 0.7694 | 0.932 | 0.635 | 0.742 |
+| 150        | 0.7702 | 0.935 | 0.640 | 0.736 |
+
+Everything from 20 up lands within 0.006, inside seed noise. Only 5 is
+clearly worse, and it fails on `right` (0.682), which is where the
+depth-discontinuity streaks show up -- drop the floor far enough and they
+come back.
+
+This matters for the real dataset, where the same number means something
+else: cells there hold a per-cell median of 101 points against sim's 22,
+so 80 sits at 0.8x the median in real and 3.6x in sim, roughly sim's 20.
+That still lands in the flat region, so `cc_real_bevwall_ep7` keeps 80
+rather than rescaling to the ~230 that would match sim's best by
+percentile -- there is nothing to gain inside noise.
+
 ## Floor band vs wall band
 
 The wall band (`z` in [0.05, 1.6]) encodes a side opening as a gap in the

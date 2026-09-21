@@ -1,3 +1,4 @@
+import math
 import os
 from typing import Any, Dict
 
@@ -9,7 +10,16 @@ from corridor_classifier.passage_directions import (
 )
 
 
-ARCHITECTURES = ("rgb", "rgb_gru", "rgb_depth", "rgb_depth_gru")
+ARCHITECTURES = (
+    "rgb",
+    "rgb_gru",
+    "rgb_depth",
+    "rgb_depth_gru",
+    "rgb_bev",
+    "rgb_bev_gru",
+    "rgb_depth_bev",
+    "rgb_depth_bev_gru",
+)
 
 
 def package_root() -> str:
@@ -38,7 +48,9 @@ def load_yaml(path: str) -> Dict[str, Any]:
 def _validate_config(config: Dict[str, Any]) -> None:
     model = config["model"]
     runtime = config["runtime"]
+    bev_grid = config.setdefault("bev_grid", {})
     topics = config["topics"]
+    _validate_bev_grid(bev_grid, model)
 
     architecture = str(model.get("architecture", "rgb")).strip()
     if architecture not in ARCHITECTURES:
@@ -159,8 +171,15 @@ def _validate_config(config: Dict[str, Any]) -> None:
     model["use_gru"] = bool(model.get("use_gru", False))
     if model["use_gru"] != architecture.endswith("gru"):
         raise ValueError("model use_gru does not match architecture")
+    model["use_bev"] = bool(model.get("use_bev", False))
     if model["use_depth"] != ("depth" in architecture):
         raise ValueError("model use_depth does not match architecture")
+    # Same rule for the BEV branch as for depth: the architecture name
+    # states which inputs the model takes, and the flag has to agree. Left
+    # implicit, a use_bev config paired with an "rgb" architecture loaded
+    # happily and dropped the BEV input without saying so.
+    if model["use_bev"] != ("bev" in architecture):
+        raise ValueError("model use_bev does not match architecture")
     if not model["use_gru"] and model["sequence_length"] != 1:
         raise ValueError("non-GRU architectures require sequence_length=1")
     if not model["use_gru"] and model["frame_stride"] != 1:
@@ -187,6 +206,42 @@ def _validate_config(config: Dict[str, Any]) -> None:
         model["fusion_dim"] = int(model.get("fusion_dim", 256))
         if model["fusion_dim"] <= 0:
             raise ValueError("model.fusion_dim must be positive")
+    # Optional BEV occupancy-grid branch (see BevEncoder /
+    # scripts/add_bev_grid_to_dataset.py). Defaulted off so every existing
+    # config keeps loading unchanged.
+    if model["use_bev"]:
+        model["bev_feature_dim"] = int(model.get("bev_feature_dim", 64))
+        model["bev_pool_size"] = int(model.get("bev_pool_size", 1))
+        if model["bev_feature_dim"] <= 0 or model["bev_pool_size"] <= 0:
+            raise ValueError("bev dimensions must be positive")
+        model["bev_source"] = str(model.get("bev_source", "grid"))
+        if model["bev_source"] not in ("grid", "scan"):
+            raise ValueError("model.bev_source must be grid or scan")
+        # Sessions accumulate one manifest column per BEV experiment, so
+        # naming the column keeps a config reading the grid it means to
+        # read instead of whatever BEV_GRID_COLUMNS happens to rank first.
+        model["bev_manifest_column"] = str(
+            model.get("bev_manifest_column", "")
+        ).strip()
+        model["bev_binary"] = bool(model.get("bev_binary", False))
+        model["bev_min_points"] = float(model.get("bev_min_points", 0.0))
+        if model["bev_min_points"] < 0.0:
+            raise ValueError("bev_min_points must be non-negative")
+        model["bev_drop_height"] = bool(model.get("bev_drop_height", False))
+        model["bev_encoder_name"] = str(model.get("bev_encoder_name", ""))
+        model["bev_encoder_input_size"] = int(
+            model.get("bev_encoder_input_size", 128)
+        )
+        model["bev_encoder_freeze"] = bool(
+            model.get("bev_encoder_freeze", True)
+        )
+        if model["bev_encoder_input_size"] <= 0:
+            raise ValueError("bev_encoder_input_size must be positive")
+        model["bev_max_range_m"] = float(model.get("bev_max_range_m", 8.0))
+        model["bev_lateral_limit_m"] = float(
+            model.get("bev_lateral_limit_m", 4.0)
+        )
+
     if model["use_gru"]:
         model["gru_hidden_size"] = int(model.get("gru_hidden_size", 256))
         model["gru_num_layers"] = int(model.get("gru_num_layers", 1))
@@ -198,6 +253,37 @@ def _validate_config(config: Dict[str, Any]) -> None:
         raise ValueError("runtime.inference_rate must be positive")
     runtime["inference_rate"] = inference_rate
 
+    # Runtime turning gate and debouncer. Defaulted here rather than
+    # required, so experiment config directories written before these keys
+    # existed keep loading.
+    threshold = float(
+        runtime.get("turning_angular_speed_threshold_rad_s", 0.20)
+    )
+    if threshold <= 0.0:
+        raise ValueError(
+            "runtime.turning_angular_speed_threshold_rad_s must be positive"
+        )
+    runtime["turning_angular_speed_threshold_rad_s"] = threshold
+
+    for key, default in (
+        ("turning_stale_timeout_seconds", 1.0),
+        ("scenario_target_labels_stale_timeout_seconds", 1.0),
+    ):
+        value = float(runtime.get(key, default))
+        if value <= 0.0:
+            raise ValueError(f"runtime.{key} must be positive")
+        runtime[key] = value
+
+    bev_time_difference = float(runtime.get("bev_max_time_difference_seconds", 1.0))
+    if not math.isfinite(bev_time_difference) or bev_time_difference <= 0.0:
+        raise ValueError("runtime.bev_max_time_difference_seconds must be finite and positive")
+    runtime["bev_max_time_difference_seconds"] = bev_time_difference
+
+    min_confirm_frames = int(runtime.get("direction_min_confirm_frames", 3))
+    if min_confirm_frames < 1:
+        raise ValueError("runtime.direction_min_confirm_frames must be >= 1")
+    runtime["direction_min_confirm_frames"] = min_confirm_frames
+
     required_topic_keys = (
         "image_topic",
         "passage_type_topic",
@@ -208,6 +294,38 @@ def _validate_config(config: Dict[str, Any]) -> None:
     missing = [key for key in required_topic_keys if not topics.get(key)]
     if missing:
         raise ValueError(f"topics config is missing keys: {', '.join(missing)}")
+
+    # Runtime-only topics, defaulted for the same backward-compatibility
+    # reason as the runtime keys above. scenario_target_labels_topic stays
+    # empty by default: it is only set when running alongside
+    # scenario_navigation.
+    topics.setdefault("cmd_dir_topic", "/cmd_dir_intersection")
+    topics.setdefault("cmd_vel_topic", "/cmd_vel")
+    topics.setdefault("scenario_target_labels_topic", "")
+
+
+def _validate_bev_grid(bev_grid: Dict[str, Any], model: Dict[str, Any]) -> None:
+    """Geometry of the runtime BEV grid.
+
+    These must describe the same grid scripts/add_bev_grid_to_dataset.py
+    produced for training -- the model has no way to notice a mismatch, it
+    just sees cells in the wrong places. The defaults are the ones the
+    production checkpoint was trained on: 0.1-5.1 m forward over 50 bins
+    and +-3.5 m lateral over 70, i.e. 0.10 m square cells.
+    """
+    forward_range = bev_grid.get("forward_range_m", [0.1, 5.1])
+    if len(forward_range) != 2:
+        raise ValueError("bev_grid.forward_range_m must hold two values")
+    bev_grid["forward_range_m"] = [float(value) for value in forward_range]
+    if bev_grid["forward_range_m"][1] <= bev_grid["forward_range_m"][0]:
+        raise ValueError("bev_grid.forward_range_m must increase")
+    bev_grid["map_width_m"] = float(bev_grid.get("map_width_m", 7.0))
+    bev_grid["forward_bins"] = int(bev_grid.get("forward_bins", 50))
+    bev_grid["lateral_bins"] = int(bev_grid.get("lateral_bins", 70))
+    if bev_grid["map_width_m"] <= 0.0:
+        raise ValueError("bev_grid.map_width_m must be positive")
+    if bev_grid["forward_bins"] <= 0 or bev_grid["lateral_bins"] <= 0:
+        raise ValueError("bev_grid bin counts must be positive")
 
 
 def load_config(config_dir: str = None) -> Dict[str, Any]:
@@ -223,6 +341,7 @@ def load_config(config_dir: str = None) -> Dict[str, Any]:
     config = {
         "model": dict(model_data["model"]),
         "runtime": dict(model_data.get("runtime", {})),
+        "bev_grid": dict(model_data.get("bev_grid", {})),
         "topics": topics,
     }
     _validate_config(config)

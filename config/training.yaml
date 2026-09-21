@@ -12,6 +12,12 @@ training:
     rgb_gru: 16
     rgb_depth: 32
     rgb_depth_gru: 8
+    # The BEV branch is a 0.355 M CNN over a 50x70 grid, far lighter than
+    # the depth branch it replaces, so these match their non-BEV twins.
+    rgb_bev: 64
+    rgb_bev_gru: 16
+    rgb_depth_bev: 32
+    rgb_depth_bev_gru: 8
   use_test: false
   use_amp: true
   seed: 0

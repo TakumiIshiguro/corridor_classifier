@@ -68,6 +68,7 @@ def main():
         resolve_path(dataset_config["test_data_dir"], package_root()),
         model_config["num_classes"],
         dataset_config["test_session_names"],
+        bev_grid_column=model_config.get("bev_manifest_column"),
     )
     dataset = CorridorMultiInputDataset(
         samples,

@@ -5,6 +5,7 @@ from typing import Dict, Iterable, Optional, Sequence
 
 import numpy as np
 import cv2
+import timm
 import torch
 from PIL import Image
 from torch import nn
@@ -23,7 +24,16 @@ from corridor_classifier.passage_directions import (
 )
 
 
-ARCHITECTURES = ("rgb", "rgb_gru", "rgb_depth", "rgb_depth_gru")
+ARCHITECTURES = (
+    "rgb",
+    "rgb_gru",
+    "rgb_depth",
+    "rgb_depth_gru",
+    "rgb_bev",
+    "rgb_bev_gru",
+    "rgb_depth_bev",
+    "rgb_depth_bev_gru",
+)
 # (readout_layers, append_patch_mean, regional_grid=(rows, columns))
 DINO_READOUTS = {
     "last_cls": (1, False, (0, 0)),
@@ -138,6 +148,147 @@ class DepthEncoder(nn.Module):
         return self.projection(self.features(depth).flatten(1))
 
 
+class BevEncoder(nn.Module):
+    """Small CNN over the BEV occupancy grid from add_bev_grid_to_dataset.py.
+
+    Input is (B, 2, forward_bins, lateral_bins): channel 0 the point count
+    per cell, channel 1 the mean height of those points. Counts are
+    log1p-compressed on the way in, since a cell's count spans orders of
+    magnitude with distance (near cells collect far more pixels than far
+    ones) and the raw scale would dominate the height channel.
+    """
+
+    def __init__(self, output_dim: int, pool_size: int = 1, in_channels: int = 2):
+        super().__init__()
+        self.pool_size = int(pool_size)
+        self.in_channels = int(in_channels)
+        if self.pool_size <= 0:
+            raise ValueError("bev pool size must be positive")
+        self.features = nn.Sequential(
+            nn.Conv2d(self.in_channels, 32, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(32),
+            nn.GELU(),
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(64),
+            nn.GELU(),
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(128),
+            nn.GELU(),
+            nn.AdaptiveAvgPool2d((self.pool_size, self.pool_size)),
+        )
+        self.projection = nn.Linear(
+            128 * self.pool_size * self.pool_size,
+            int(output_dim),
+        )
+
+    def forward(self, bev: torch.Tensor) -> torch.Tensor:
+        # Already binary (0/1) when the dataset binarised it; log1p is a
+        # no-op scale there, so it is applied unconditionally for the
+        # raw-count case.
+        counts = torch.log1p(bev[:, :1].clamp_min(0.0))
+        normalized = torch.cat((counts, bev[:, 1:]), dim=1)
+        return self.projection(self.features(normalized).flatten(1))
+
+
+
+class BevScanEncoder(nn.Module):
+    """1D CNN over the nearest-obstacle BEV scan from add_bev_to_dataset.py.
+
+    Input is (B, 3, lateral_bins): channel 0 the forward distance to the
+    nearest obstacle in that bin (normalized by the scan's maximum range,
+    1.0 where the bin is empty), channel 1 the lateral position (normalized
+    to [-1, 1]), channel 2 a validity flag. At 64 bins this is an eighth
+    the width of the occupancy grid BevEncoder consumes, which matters at
+    this dataset size -- the grid version overfit.
+    """
+
+    def __init__(self, output_dim: int):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv1d(3, 32, kernel_size=5, padding=2),
+            nn.BatchNorm1d(32),
+            nn.GELU(),
+            nn.Conv1d(32, 64, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm1d(64),
+            nn.GELU(),
+            nn.Conv1d(64, 64, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm1d(64),
+            nn.GELU(),
+            nn.AdaptiveAvgPool1d(1),
+        )
+        self.projection = nn.Linear(64, int(output_dim))
+
+    def forward(self, scan: torch.Tensor) -> torch.Tensor:
+        return self.projection(self.features(scan).flatten(1))
+
+
+
+class BevPretrainedEncoder(nn.Module):
+    """ImageNet-pretrained CNN over the BEV occupancy grid.
+
+    The scratch-trained BevEncoder gets no equivalent of the frozen DINOv2
+    backbone the RGB branch has, so this swaps in a pretrained one (timm,
+    with the stem adapted to the grid's channel count) to test whether
+    pretraining is what the BEV branch is missing. The grid is bilinearly
+    upsampled to `input_size` first, since 50x70 is below what these
+    backbones downsample cleanly.
+
+    `global_pool=""` keeps the backbone's spatial feature map, which is
+    then pooled to `pool_size` exactly as BevEncoder does. Letting timm
+    pool globally (its `num_classes=0` default) would repeat the defect
+    that made every BEV result before this worthless: averaging the map to
+    a point discards where the opening is, which is the only thing the BEV
+    knows that the RGB branch does not.
+    """
+
+    def __init__(
+        self,
+        output_dim: int,
+        model_name: str,
+        input_size: int = 128,
+        pretrained: bool = True,
+        freeze: bool = True,
+        pool_size: int = 4,
+        in_channels: int = 2,
+    ):
+        super().__init__()
+        self.input_size = int(input_size)
+        self.in_channels = int(in_channels)
+        self.pool_size = int(pool_size)
+        if self.pool_size <= 0:
+            raise ValueError("bev pool size must be positive")
+        self.backbone = timm.create_model(
+            model_name,
+            pretrained=bool(pretrained),
+            in_chans=self.in_channels,
+            num_classes=0,
+            global_pool="",
+        )
+        self.freeze = bool(freeze)
+        if self.freeze:
+            for parameter in self.backbone.parameters():
+                parameter.requires_grad = False
+        self.pool = nn.AdaptiveAvgPool2d((self.pool_size, self.pool_size))
+        self.projection = nn.Linear(
+            int(self.backbone.num_features) * self.pool_size * self.pool_size,
+            int(output_dim),
+        )
+
+    def forward(self, bev: torch.Tensor) -> torch.Tensor:
+        counts = torch.log1p(bev[:, :1].clamp_min(0.0))
+        x = torch.cat((counts, bev[:, 1:]), dim=1)
+        x = nn.functional.interpolate(
+            x, size=(self.input_size, self.input_size),
+            mode="bilinear", align_corners=False,
+        )
+        if self.freeze:
+            with torch.no_grad():
+                features = self.backbone(x)
+        else:
+            features = self.backbone(x)
+        return self.projection(self.pool(features).flatten(1))
+
+
 class RGBModel(nn.Module):
     """Legacy-compatible single-frame DINO classifier."""
 
@@ -162,8 +313,16 @@ class MultimodalCorridorModel(nn.Module):
         num_classes: int,
         use_depth: bool,
         use_gru: bool,
+        use_bev: bool = False,
         depth_feature_dim: int = 128,
         depth_pool_size: int = 1,
+        bev_feature_dim: int = 64,
+        bev_pool_size: int = 1,
+        bev_source: str = "grid",
+        bev_encoder_name: str = "",
+        bev_encoder_input_size: int = 128,
+        bev_encoder_freeze: bool = True,
+        bev_in_channels: int = 2,
         fusion_dim: int = 256,
         gru_hidden_size: int = 256,
         gru_num_layers: int = 1,
@@ -174,6 +333,7 @@ class MultimodalCorridorModel(nn.Module):
         self.dino = dino
         self.use_depth = bool(use_depth)
         self.use_gru = bool(use_gru)
+        self.use_bev = bool(use_bev)
         self.output_mode = str(output_mode)
         self.dino_readout = str(dino_readout)
         if self.output_mode not in ("class", "passage_directions"):
@@ -192,7 +352,32 @@ class MultimodalCorridorModel(nn.Module):
             if self.use_depth
             else None
         )
-        combined_dim = rgb_dim + (int(depth_feature_dim) if self.use_depth else 0)
+        self.bev_source = str(bev_source)
+        if self.bev_source not in ("grid", "scan"):
+            raise ValueError(f"unsupported bev_source: {self.bev_source}")
+        if not self.use_bev:
+            self.bev_encoder = None
+        elif self.bev_source == "scan":
+            self.bev_encoder = BevScanEncoder(bev_feature_dim)
+        elif bev_encoder_name:
+            self.bev_encoder = BevPretrainedEncoder(
+                bev_feature_dim,
+                str(bev_encoder_name),
+                input_size=int(bev_encoder_input_size),
+                pretrained=True,
+                freeze=bool(bev_encoder_freeze),
+                pool_size=bev_pool_size,
+                in_channels=bev_in_channels,
+            )
+        else:
+            self.bev_encoder = BevEncoder(
+                bev_feature_dim, bev_pool_size, in_channels=bev_in_channels
+            )
+        combined_dim = (
+            rgb_dim
+            + (int(depth_feature_dim) if self.use_depth else 0)
+            + (int(bev_feature_dim) if self.use_bev else 0)
+        )
         self.fusion = nn.Sequential(
             nn.LayerNorm(combined_dim),
             nn.Linear(combined_dim, int(fusion_dim)),
@@ -220,6 +405,7 @@ class MultimodalCorridorModel(nn.Module):
         self,
         rgb: torch.Tensor,
         depth: Optional[torch.Tensor] = None,
+        bev: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if rgb.ndim != 4:
             raise ValueError("rgb frames must have shape NxCxHxW")
@@ -231,6 +417,13 @@ class MultimodalCorridorModel(nn.Module):
             if depth.ndim != 4 or depth.shape[0] != rgb.shape[0]:
                 raise ValueError("depth frames must match the rgb batch")
             features.append(self.depth_encoder(depth))
+        if self.use_bev:
+            if bev is None:
+                raise ValueError("bev input is required by this architecture")
+            expected_ndim = 3 if self.bev_source == "scan" else 4
+            if bev.ndim != expected_ndim or bev.shape[0] != rgb.shape[0]:
+                raise ValueError("bev frames must match the rgb batch")
+            features.append(self.bev_encoder(bev))
         return self.fusion(torch.cat(features, dim=-1))
 
     def _encode_rgb(self, rgb: torch.Tensor) -> torch.Tensor:
@@ -260,9 +453,18 @@ class MultimodalCorridorModel(nn.Module):
             depth is None or depth.shape[:2] != (batch_size, sequence_length)
         ):
             raise ValueError("rgb and depth sequence dimensions must match")
+        bev = inputs.get("bev")
+        frame_ndim = 3 if self.bev_source == "scan" else 4
+        if bev is not None and bev.ndim == frame_ndim:
+            bev = bev.unsqueeze(1)
+        if self.use_bev and (
+            bev is None or bev.shape[:2] != (batch_size, sequence_length)
+        ):
+            raise ValueError("rgb and bev sequence dimensions must match")
         fused = self.encode_frames(
             rgb.flatten(0, 1),
             depth.flatten(0, 1) if depth is not None else None,
+            bev.flatten(0, 1) if bev is not None else None,
         ).reshape(batch_size, sequence_length, -1)
         return self.classify_features(fused)
 
@@ -287,7 +489,14 @@ def create_corridor_model(
         "pretrained_weights_path": pretrained_weights_path,
     }
     output_mode = str(model_config.get("output_mode", "class"))
-    if architecture == "rgb" and output_mode == "class":
+    # RGBModel is the plain-classifier shortcut and has no BEV branch, so a
+    # use_bev config must go to MultimodalCorridorModel even here -- taking
+    # the shortcut would drop the BEV input without saying so.
+    if (
+        architecture == "rgb"
+        and output_mode == "class"
+        and not bool(model_config.get("use_bev", False))
+    ):
         return RGBModel(
             create_dino_model(
                 num_classes=int(model_config["num_classes"]),
@@ -297,6 +506,18 @@ def create_corridor_model(
     dino = create_dino_model(num_classes=0, **common)
     return MultimodalCorridorModel(
         dino=dino,
+        use_bev=bool(model_config.get("use_bev", False)),
+        bev_feature_dim=int(model_config.get("bev_feature_dim", 64)),
+        bev_pool_size=int(model_config.get("bev_pool_size", 1)),
+        bev_source=str(model_config.get("bev_source", "grid")),
+        bev_encoder_name=str(model_config.get("bev_encoder_name", "")),
+        bev_encoder_input_size=int(
+            model_config.get("bev_encoder_input_size", 128)
+        ),
+        bev_encoder_freeze=bool(model_config.get("bev_encoder_freeze", True)),
+        bev_in_channels=(
+            1 if bool(model_config.get("bev_drop_height", False)) else 2
+        ),
         num_classes=int(model_config["num_classes"]),
         use_depth=bool(model_config["use_depth"]),
         use_gru=bool(model_config["use_gru"]),
@@ -393,6 +614,10 @@ class CorridorPredictor:
             model_config.get("maximum_gap_seconds", 0.4)
         )
         self.use_depth = bool(model_config["use_depth"])
+        self.use_bev = bool(model_config.get("use_bev", False))
+        self.bev_min_points = float(model_config.get("bev_min_points", 0.0))
+        self.bev_binary = bool(model_config.get("bev_binary", False))
+        self.bev_drop_height = bool(model_config.get("bev_drop_height", False))
         self._rgb = deque(maxlen=self.required_context_length)
         self._depth = deque(maxlen=self.required_context_length)
         self._features = deque(maxlen=self.required_context_length)
@@ -413,11 +638,32 @@ class CorridorPredictor:
             return len(self._features)
         return len(self._rgb)
 
+    def _bev_to_tensor(self, bev_grid: np.ndarray) -> torch.Tensor:
+        """Apply the transforms CorridorMultiInputDataset applies at train time.
+
+        Order matters and matches the dataset: the point-count floor is
+        taken against raw counts, binarisation after it, height dropped
+        last. Feeding a grid that skipped any of these would put the model
+        on a different input scale than it was trained on.
+        """
+        grid = torch.from_numpy(
+            np.asarray(bev_grid, dtype=np.float32)
+        ).permute(2, 0, 1)
+        if self.bev_min_points > 0.0:
+            keep = grid[:1] >= self.bev_min_points
+            grid = torch.cat((grid[:1] * keep, grid[1:] * keep), dim=0)
+        if self.bev_binary:
+            grid = torch.cat(((grid[:1] > 0).float(), grid[1:]), dim=0)
+        if self.bev_drop_height:
+            grid = grid[:1]
+        return grid
+
     def predict(
         self,
         image: Image.Image,
         depth_meters: Optional[np.ndarray] = None,
         stamp: Optional[float] = None,
+        bev_grid: Optional[np.ndarray] = None,
     ) -> Optional[Prediction]:
         if stamp is not None and self._last_stamp is not None:
             gap = float(stamp) - self._last_stamp
@@ -444,6 +690,12 @@ class CorridorPredictor:
             )
         else:
             depth_tensor = None
+        if self.use_bev:
+            if bev_grid is None:
+                raise ValueError("bev input is required by this architecture")
+            bev_tensor = self._bev_to_tensor(bev_grid)
+        else:
+            bev_tensor = None
         autocast = (
             torch.autocast("cuda", dtype=torch.float16)
             if self.use_fp16
@@ -460,6 +712,13 @@ class CorridorPredictor:
                             self.device, non_blocking=True
                         )
                         if depth_tensor is not None
+                        else None
+                    ),
+                    (
+                        bev_tensor.unsqueeze(0).to(
+                            self.device, non_blocking=True
+                        )
+                        if bev_tensor is not None
                         else None
                     ),
                 )[0]

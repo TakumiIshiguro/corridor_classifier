@@ -24,6 +24,7 @@ class CorridorSample:
     stamp: float = 0.0
     depth_path: Optional[str] = None
     bev_path: Optional[str] = None
+    bev_grid_path: Optional[str] = None
 
 
 def session_directories(dataset_dir: str) -> List[str]:
@@ -37,9 +38,22 @@ def session_directories(dataset_dir: str) -> List[str]:
     ]
 
 
+# Manifest columns holding a BEV grid, newest first. A session that has
+# been through several BEV experiments carries several of these at once, so
+# a config that wants a specific one must say which via the model config's
+# bev_manifest_column; this order only decides the default.
+BEV_GRID_COLUMNS = (
+    "bev_floor_filename",
+    "bev5m_filename",
+    "bev_grid64_filename",
+    "bev_grid_filename",
+)
+
+
 def load_session_samples(
     session_dir: str,
     num_classes: int,
+    bev_grid_column: Optional[str] = None,
 ) -> List[CorridorSample]:
     manifest_path = os.path.join(session_dir, "samples.csv")
     samples = []
@@ -80,6 +94,29 @@ def load_session_samples(
                 raise FileNotFoundError(
                     f"dataset BEV scan was not found: {bev_path}"
                 )
+            if bev_grid_column:
+                if bev_grid_column not in row:
+                    raise KeyError(
+                        f"{manifest_path} has no column {bev_grid_column!r}; "
+                        f"available: {sorted(row)}"
+                    )
+                bev_grid_filename = str(row.get(bev_grid_column) or "").strip()
+            else:
+                bev_grid_filename = str(
+                    next(
+                        (row[name] for name in BEV_GRID_COLUMNS if row.get(name)),
+                        "",
+                    )
+                ).strip()
+            bev_grid_path = (
+                os.path.join(session_dir, bev_grid_filename)
+                if bev_grid_filename
+                else None
+            )
+            if bev_grid_path is not None and not os.path.isfile(bev_grid_path):
+                raise FileNotFoundError(
+                    f"dataset BEV grid was not found: {bev_grid_path}"
+                )
             samples.append(
                 CorridorSample(
                     image_path=image_path,
@@ -88,6 +125,7 @@ def load_session_samples(
                     stamp=float(row.get("stamp", 0.0) or 0.0),
                     depth_path=depth_path,
                     bev_path=bev_path,
+                    bev_grid_path=bev_grid_path,
                 )
             )
     if not samples:
@@ -98,10 +136,13 @@ def load_session_samples(
 def _load_sessions(
     directories: Sequence[str],
     num_classes: int,
+    bev_grid_column: Optional[str] = None,
 ) -> List[CorridorSample]:
     samples = []
     for directory in directories:
-        samples.extend(load_session_samples(directory, num_classes))
+        samples.extend(
+            load_session_samples(directory, num_classes, bev_grid_column)
+        )
     return samples
 
 
@@ -109,6 +150,7 @@ def load_dataset_samples(
     dataset_dir: str,
     num_classes: int,
     session_names: Optional[Sequence[str]] = None,
+    bev_grid_column: Optional[str] = None,
 ) -> List[CorridorSample]:
     sessions = session_directories(dataset_dir)
     if not sessions:
@@ -125,7 +167,7 @@ def load_dataset_samples(
                 f"{os.path.abspath(dataset_dir)}: {', '.join(missing)}"
             )
         sessions = [by_name[name] for name in requested]
-    return _load_sessions(sessions, num_classes)
+    return _load_sessions(sessions, num_classes, bev_grid_column)
 
 
 def class_counts(samples: Sequence[CorridorSample], num_classes: int) -> List[int]:
@@ -168,6 +210,24 @@ class CorridorDataset(Dataset):
         return tensor, sample.class_index
 
 
+
+def bev_scan_to_tensor(
+    scan: np.ndarray, max_range_m: float, lateral_limit_m: float
+) -> torch.Tensor:
+    """(lateral_bins, 2) nearest-obstacle scan -> (3, lateral_bins) tensor."""
+    scan = np.asarray(scan, dtype=np.float32)
+    if scan.ndim != 2 or scan.shape[1] != 2:
+        raise ValueError("bev scan must have shape (lateral_bins, 2)")
+    forward = scan[:, 0]
+    valid = np.isfinite(forward)
+    forward = np.where(valid, forward, max_range_m) / max(max_range_m, 1e-6)
+    lateral = np.nan_to_num(scan[:, 1], nan=0.0) / max(lateral_limit_m, 1e-6)
+    stacked = np.stack(
+        (forward, lateral, valid.astype(np.float32)), axis=0
+    )
+    return torch.from_numpy(stacked.astype(np.float32))
+
+
 class CorridorMultiInputDataset(Dataset):
     def __init__(
         self,
@@ -192,6 +252,30 @@ class CorridorMultiInputDataset(Dataset):
             variant_config.get("maximum_gap_seconds", 0.4)
         )
         self.use_depth = bool(variant_config["use_depth"])
+        self.use_bev = bool(variant_config.get("use_bev", False))
+        self.bev_source = str(variant_config.get("bev_source", "grid"))
+        # Point counts scale with 1/distance^2 under perspective projection
+        # (532 points in a cell at 0.8 m against 8 at 7.5 m, log-log
+        # correlation -0.94), so the count channel mostly re-encodes the
+        # distance the cell index already carries, plus per-environment
+        # variation in surface area and depth density. Binarising makes the
+        # grid a plain occupancy map.
+        self.bev_binary = bool(variant_config.get("bev_binary", False))
+        # A cell holding one or two stray points binarises to the same 1 as
+        # a wall face holding hundreds. Counts fall off with distance
+        # (median 603 at 0.3 m against 12 at 7.2 m) while the sparse tail
+        # sits at 2-4 points at every distance, so a flat floor removes the
+        # speckle without erasing far walls.
+        self.bev_min_points = float(variant_config.get("bev_min_points", 0.0))
+        self.bev_drop_height = bool(
+            variant_config.get("bev_drop_height", False)
+        )
+        self.bev_max_range_m = float(
+            variant_config.get("bev_max_range_m", 8.0)
+        )
+        self.bev_lateral_limit_m = float(
+            variant_config.get("bev_lateral_limit_m", 4.0)
+        )
         self.output_mode = str(variant_config.get("output_mode", "class"))
         self.class_names = tuple(variant_config.get("class_names", ()))
         self.turning_class_name = str(
@@ -271,6 +355,16 @@ class CorridorMultiInputDataset(Dataset):
                 ):
                     continue
                 sequence = window[:: self.frame_stride]
+                if self.use_bev and any(
+                    (
+                        sample.bev_path
+                        if self.bev_source == "scan"
+                        else sample.bev_grid_path
+                    )
+                    is None
+                    for sample in sequence
+                ):
+                    continue
                 if self.use_depth and any(
                     sample.depth_path is None for sample in sequence
                 ):
@@ -405,6 +499,39 @@ class CorridorMultiInputDataset(Dataset):
                     for sample in sequence
                 ]
             )
+        if self.use_bev and self.bev_source == "scan":
+            # (lateral_bins, 2) nearest-obstacle scan, NaN where the bin is
+            # empty -> (3, lateral_bins): forward normalized by the max
+            # range (1.0 when empty), lateral in [-1, 1], validity flag.
+            inputs["bev"] = torch.stack(
+                [
+                    bev_scan_to_tensor(
+                        np.load(sample.bev_path, allow_pickle=False),
+                        self.bev_max_range_m,
+                        self.bev_lateral_limit_m,
+                    )
+                    for sample in sequence
+                ]
+            )
+        elif self.use_bev:
+            # (forward_bins, lateral_bins, 2) on disk -> (2, F, L) per frame,
+            # i.e. the channel-first image layout BevEncoder expects.
+            grids = []
+            for sample in sequence:
+                g = torch.from_numpy(
+                    np.load(sample.bev_grid_path, allow_pickle=False)
+                ).permute(2, 0, 1).float()
+                if self.bev_min_points > 0.0:
+                    keep = g[:1] >= self.bev_min_points
+                    g = torch.cat((g[:1] * keep, g[1:] * keep), dim=0)
+                if self.bev_binary:
+                    g = torch.cat(
+                        ((g[:1] > 0).float(), g[1:]), dim=0
+                    )
+                if self.bev_drop_height:
+                    g = g[:1]
+                grids.append(g)
+            inputs["bev"] = torch.stack(grids)
         label = sequence[-1].class_index
         if flip:
             inputs = {

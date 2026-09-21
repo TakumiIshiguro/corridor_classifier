@@ -70,6 +70,7 @@ def main():
         dataset_dir=train_data_dir,
         num_classes=model_config["num_classes"],
         session_names=dataset_config["train_session_names"],
+        bev_grid_column=model_config.get("bev_manifest_column"),
     )
     use_test = bool(training["use_test"])
     test_data_dir = ""
@@ -83,6 +84,7 @@ def main():
             dataset_dir=test_data_dir,
             num_classes=model_config["num_classes"],
             session_names=dataset_config["test_session_names"],
+            bev_grid_column=model_config.get("bev_manifest_column"),
         )
 
     train_dataset = CorridorMultiInputDataset(

@@ -18,19 +18,37 @@ def test_default_config_has_nine_unique_classes_including_turning():
     config = load_config(os.path.join(package_root(), "config"))
 
     assert config["model"]["model_name"] == "vit_small_patch14_dinov2.lvd142m"
-    assert config["model"]["architecture"] == "rgb_gru"
+    assert config["model"]["architecture"] == "rgb_bev_gru"
+    # The deployed recipe feeds geometry as a BEV occupancy grid instead of
+    # a depth map; see config/experiments/BEV_REPRESENTATION_DECISION.md.
     assert config["model"]["use_depth"] is False
+    assert config["model"]["use_bev"] is True
+    assert config["model"]["bev_pool_size"] == 4
+    assert config["model"]["bev_drop_height"] is True
     assert config["model"]["use_gru"] is True
-    assert config["model"]["frame_stride"] == 1
+    assert config["model"]["frame_stride"] == 4
     assert config["model"]["input_size"] == [224, 224]
     assert config["model"]["num_classes"] == 9
-    assert config["model"]["dino_readout"] == "last_cls"
+    assert config["model"]["dino_readout"] == "last_cls_regional3"
+    # config/ holds the deployed settings directly, with no variants block
+    # to select from.
+    assert "variants" not in config["model"]
     assert len(set(config["model"]["class_names"])) == 9
     assert config["model"]["class_names"][-1] == "turning"
-    assert config["runtime"] == {"inference_rate": 4.0}
+    assert config["runtime"] == {
+        "inference_rate": 4.0,
+        "bev_max_time_difference_seconds": 1.0,
+        "turning_angular_speed_threshold_rad_s": 0.20,
+        "turning_stale_timeout_seconds": 1.0,
+        "direction_min_confirm_frames": 3,
+        "scenario_target_labels_stale_timeout_seconds": 1.0,
+    }
     assert config["topics"]["image_topic"] == "/camera_center/image_raw"
     assert config["topics"]["label_topic"] == "/cmd_dir_intersection"
     assert config["topics"]["passage_type_topic"] == "/passage_type"
+    assert config["topics"]["cmd_dir_topic"] == "/cmd_dir_intersection"
+    assert config["topics"]["cmd_vel_topic"] == "/cmd_vel"
+    assert config["topics"]["scenario_target_labels_topic"] == ""
 
 
 def test_resolve_path_uses_package_root_for_relative_path():
@@ -104,6 +122,76 @@ def test_collection_and_training_configs_match_model_input():
     )
 
 
+# The deployed config/ carries a single flattened architecture, so the
+# variants mechanism and the per-architecture validation are exercised with
+# a fixture of their own rather than by mutating the production config.
+ARCHITECTURE_VARIANTS = {
+    "rgb": {
+        "checkpoint_path": "weights/corridor_classifier.pth",
+        "sequence_length": 1,
+        "use_depth": False,
+        "use_gru": False,
+    },
+    "rgb_gru": {
+        "checkpoint_path": "weights/corridor_classifier_rgb_gru.pth",
+        "sequence_length": 5,
+        "maximum_gap_seconds": 0.4,
+        "use_depth": False,
+        "use_gru": True,
+        "fusion_dim": 256,
+        "gru_hidden_size": 256,
+        "gru_num_layers": 1,
+    },
+    "rgb_depth": {
+        "checkpoint_path": "weights/corridor_classifier_rgb_depth.pth",
+        "sequence_length": 1,
+        "use_depth": True,
+        "use_gru": False,
+        "depth_feature_dim": 128,
+        "fusion_dim": 256,
+        "depth_min_m": 0.1,
+        "depth_max_m": 10.0,
+    },
+    "rgb_depth_gru": {
+        "checkpoint_path": "weights/corridor_classifier_rgb_depth_gru.pth",
+        "sequence_length": 5,
+        "maximum_gap_seconds": 0.4,
+        "use_depth": True,
+        "use_gru": True,
+        "depth_feature_dim": 128,
+        "fusion_dim": 256,
+        "gru_hidden_size": 256,
+        "gru_num_layers": 1,
+        "depth_min_m": 0.1,
+        "depth_max_m": 10.0,
+    },
+}
+
+
+def _variant_config(architecture):
+    config_dir = os.path.join(package_root(), "config")
+    model_data = load_yaml(os.path.join(config_dir, "model.yaml"))
+    model = deepcopy(model_data["model"])
+    for key in ARCHITECTURE_VARIANTS["rgb_depth_gru"]:
+        model.pop(key, None)
+    # frame_stride is a deployed-checkpoint property, not part of the
+    # architecture definition; non-GRU architectures require 1.
+    model.pop("frame_stride", None)
+    # The deployed config is a BEV one; these cases cover the non-BEV
+    # architectures, whose names must not claim a BEV branch.
+    model["use_bev"] = False
+    for key in list(model):
+        if key.startswith("bev_"):
+            model.pop(key)
+    model["architecture"] = architecture
+    model["variants"] = deepcopy(ARCHITECTURE_VARIANTS)
+    return {
+        "model": model,
+        "runtime": deepcopy(model_data["runtime"]),
+        "topics": load_yaml(os.path.join(config_dir, "topics.yaml")),
+    }
+
+
 @pytest.mark.parametrize(
     "architecture,use_depth,use_gru,sequence_length",
     [
@@ -116,15 +204,7 @@ def test_collection_and_training_configs_match_model_input():
 def test_all_architecture_configs_are_valid(
     architecture, use_depth, use_gru, sequence_length
 ):
-    config_dir = os.path.join(package_root(), "config")
-    model_data = load_yaml(os.path.join(config_dir, "model.yaml"))
-    model = deepcopy(model_data["model"])
-    model["architecture"] = architecture
-    config = {
-        "model": model,
-        "runtime": deepcopy(model_data["runtime"]),
-        "topics": load_yaml(os.path.join(config_dir, "topics.yaml")),
-    }
+    config = _variant_config(architecture)
 
     _validate_config(config)
 
@@ -177,6 +257,7 @@ def test_regional_dino_readout_is_accepted():
     _validate_config(config)
 
     assert config["model"]["dino_readout"] == "last_cls_regional3"
+    assert config["model"]["frame_stride"] == 4
 
 
 def test_invalid_depth_pool_size_is_rejected():
@@ -188,7 +269,71 @@ def test_invalid_depth_pool_size_is_rejected():
         "topics": load_yaml(os.path.join(config_dir, "topics.yaml")),
     }
     config["model"]["architecture"] = "rgb_depth_gru"
-    config["model"]["variants"]["rgb_depth_gru"]["depth_pool_size"] = 0
+    config["model"]["use_depth"] = True
+    config["model"]["use_bev"] = False
+    config["model"]["depth_pool_size"] = 0
 
     with pytest.raises(ValueError, match="depth_pool_size"):
+        _validate_config(config)
+
+
+@pytest.mark.parametrize(
+    "architecture,use_depth,use_bev",
+    [
+        ("rgb_bev", False, True),
+        ("rgb_bev_gru", False, True),
+        ("rgb_depth_bev", True, True),
+        ("rgb_depth_bev_gru", True, True),
+    ],
+)
+def test_bev_architecture_names_declare_the_bev_branch(
+    architecture, use_depth, use_bev
+):
+    config_dir = os.path.join(package_root(), "config")
+    model_data = load_yaml(os.path.join(config_dir, "model.yaml"))
+    config = {
+        "model": deepcopy(model_data["model"]),
+        "runtime": deepcopy(model_data["runtime"]),
+        "topics": load_yaml(os.path.join(config_dir, "topics.yaml")),
+    }
+    config["model"]["architecture"] = architecture
+    config["model"]["use_depth"] = use_depth
+    config["model"]["use_gru"] = architecture.endswith("gru")
+    if not config["model"]["use_gru"]:
+        config["model"]["sequence_length"] = 1
+        config["model"]["frame_stride"] = 1
+
+    _validate_config(config)
+
+    assert config["model"]["use_bev"] is use_bev
+
+
+@pytest.mark.parametrize("value", [0, -1, float("nan"), float("inf")])
+def test_bev_time_difference_rejects_invalid_limits(value):
+    config = load_config()
+    config["runtime"]["bev_max_time_difference_seconds"] = value
+    with pytest.raises(ValueError, match="bev_max_time_difference_seconds"):
+        _validate_config(config)
+
+
+def test_bev_time_difference_defaults_for_existing_configs():
+    config = load_config()
+    del config["runtime"]["bev_max_time_difference_seconds"]
+    _validate_config(config)
+    assert config["runtime"]["bev_max_time_difference_seconds"] == 1.0
+
+
+def test_use_bev_must_match_the_architecture_name():
+    config_dir = os.path.join(package_root(), "config")
+    model_data = load_yaml(os.path.join(config_dir, "model.yaml"))
+    config = {
+        "model": deepcopy(model_data["model"]),
+        "runtime": deepcopy(model_data["runtime"]),
+        "topics": load_yaml(os.path.join(config_dir, "topics.yaml")),
+    }
+    # An "rgb_gru" name with use_bev left on is exactly the pairing that
+    # used to load and then silently drop the BEV input.
+    config["model"]["architecture"] = "rgb_gru"
+
+    with pytest.raises(ValueError, match="use_bev"):
         _validate_config(config)

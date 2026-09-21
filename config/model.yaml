@@ -1,7 +1,18 @@
 model:
-  # Select one: rgb, rgb_gru, rgb_depth, rgb_depth_gru.
-  architecture: rgb_gru
-  # DINOv2 ViT-S/14 is the smallest official DINOv2 backbone.
+  # RGB + a bird's-eye wall-occupancy grid, no depth map. On the unseen
+  # area (i-n) this scores 0.775 macro F1 against 0.749 for the RGB+depth
+  # recipe it replaces, over two seeds whose ranges do not overlap, and
+  # 0.694 for what was deployed before (that one also trained 16 epochs;
+  # see `epochs` in config/experiments/cc_real_turnfix_ep7/training.yaml
+  # for why 7 is now the number). Full write-up in
+  # config/experiments/BEV_REPRESENTATION_DECISION.md.
+  #
+  # Trained on sim (a_f, g, h). A real-trained BEV model does not exist
+  # yet; for the real robot use weights/production/real_turnfix_ep7.pth,
+  # which is RGB+depth and needs `architecture: rgb_depth_gru` with the
+  # depth block below restored.
+  architecture: rgb_bev_gru
+  output_mode: passage_directions
   model_name: vit_small_patch14_dinov2.lvd142m
   input_size: [224, 224]
   num_classes: 9
@@ -15,49 +26,100 @@ model:
     - 3_way_center
     - 3_way_left
     - turning
+  direction_names: [front, left, right]
+  # Thresholds tuned via scripts/tune_passage_thresholds.py on g,h no
+  # longer apply: g,h are part of the training set, so evaluating
+  # thresholds on them would be leakage, and tuning on the training
+  # sessions actively hurts -- it scored 0.678 on the unseen area against
+  # 0.694 for flat 0.5, because the model is at 0.97 macro F1 there and
+  # never shows the underconfidence the unseen area provokes.
+  #
+  # Flat 0.5 costs much less than it used to. At 16 epochs the unseen-area
+  # optimum was front 0.05 / left 0.90 and flat 0.5 gave up 0.07-0.10; at
+  # 7 epochs it is front 0.10-0.20 / left 0.50-0.65 and the cost is 0.02.
+  # Stopping early calibrates the model as well as generalising it.
+  direction_thresholds: [0.5, 0.5, 0.5]
+  turning_class_name: turning
   device: auto
   use_fp16: true
   strict_checkpoint: true
+  dino_readout: last_cls_regional3
+  checkpoint_path: weights/production/bevwall_pool4.pth
+  sequence_length: 3
+  frame_stride: 4
+  # At 4 Hz inference (0.25 s period), 0.4 s tolerated essentially zero
+  # missed frames before discarding the GRU's temporal buffer, forcing a
+  # full 9-frame (~2.25 s) recollection after any brief camera/publish
+  # hiccup, not just after a real turn. Widen the margin so a couple of
+  # dropped frames don't trigger an unnecessary reset.
+  maximum_gap_seconds: 0.8
+  use_depth: false
+  use_gru: true
+  use_bev: true
+  # Sessions accumulate one manifest column per BEV experiment, so the
+  # column is named rather than left to BEV_GRID_COLUMNS' default order.
+  bev_manifest_column: bev5m_filename
+  bev_feature_dim: 128
+  # 4, not 1. AdaptiveAvgPool2d((1,1)) averages the whole 50x70 grid into
+  # one value per channel, which discards where the opening is -- the only
+  # thing the BEV knows that the RGB branch does not. With pool 1 the BEV
+  # branch was worth +0.005 macro F1 over an RGB-only control; at pool 4
+  # it is worth +0.114. Raising it further does not help (6/8/12 all land
+  # inside seed noise) and costs parameters as pool^2.
+  bev_pool_size: 4
+  # Binary occupancy: raw counts track 1/distance^2, re-encoding the
+  # distance the cell index already carries plus per-environment surface
+  # density.
+  bev_binary: true
+  bev_min_points: 80
+  # The runtime cloud on bev_points_topic is flattened to z=0, so the
+  # mean-height channel would be all zeros at inference. Dropping it costs
+  # 0.008 macro F1, inside the 0.004-0.011 seed noise, and keeps runtime
+  # and training on the same input.
+  bev_drop_height: true
+  fusion_dim: 256
+  gru_hidden_size: 256
+  gru_num_layers: 1
 
-  variants:
-    rgb:
-      checkpoint_path: weights/corridor_classifier.pth
-      sequence_length: 1
-      use_depth: false
-      use_gru: false
-
-    rgb_gru:
-      checkpoint_path: weights/corridor_classifier_rgb_gru.pth
-      sequence_length: 5
-      maximum_gap_seconds: 0.4
-      use_depth: false
-      use_gru: true
-      fusion_dim: 256
-      gru_hidden_size: 256
-      gru_num_layers: 1
-
-    rgb_depth:
-      checkpoint_path: weights/corridor_classifier_rgb_depth.pth
-      sequence_length: 1
-      use_depth: true
-      use_gru: false
-      depth_feature_dim: 128
-      fusion_dim: 256
-      depth_min_m: 0.1
-      depth_max_m: 10.0
-
-    rgb_depth_gru:
-      checkpoint_path: weights/corridor_classifier_rgb_depth_gru.pth
-      sequence_length: 5
-      maximum_gap_seconds: 0.4
-      use_depth: true
-      use_gru: true
-      depth_feature_dim: 128
-      fusion_dim: 256
-      gru_hidden_size: 256
-      gru_num_layers: 1
-      depth_min_m: 0.1
-      depth_max_m: 10.0
+# Geometry of the runtime BEV grid, binned from bev_points_topic. It must
+# match what scripts/add_bev_grid_to_dataset.py produced for training --
+# the model cannot notice a mismatch, it just sees cells in the wrong
+# places. 0.1-5.1 m forward over 50 bins and +-3.5 m lateral over 70 gives
+# 0.10 m square cells. unidepth_ros crops to the same band in its
+# `bev_projection` block.
+bev_grid:
+  forward_range_m: [0.1, 5.1]
+  map_width_m: 7.0
+  forward_bins: 50
+  lateral_bins: 70
 
 runtime:
   inference_rate: 4.0
+  # Skip inference and reset temporal history when RGB/BEV capture times
+  # differ by more than this limit (four periods at 4 Hz).
+  bev_max_time_difference_seconds: 1.0
+  # Inference is skipped entirely and passage_type publishes "turning"
+  # instead, since the model is not trained to classify passage shape
+  # mid-turn, whenever BOTH hold: scenario_navigation is commanding
+  # something other than straight ([1,0,0]) on cmd_dir_topic, AND the
+  # robot's actual cmd_vel.angular.z is at or above this threshold.
+  # cmd_dir alone is not enough (stop, [0,0,0], is "not straight" too but
+  # is not turning); cmd_vel alone is not enough either (vnm_ros/CARE's own
+  # obstacle-avoidance steering can produce a large angular velocity while
+  # scenario_navigation still commands straight); requiring both rules out
+  # CARE without a separate CARE-avoidance signal.
+  #
+  # 0.20 matches the threshold used to label "turning" when building the
+  # training dataset (dataset.yaml's
+  # turn_detection.angular_speed_threshold_rad_s), so runtime and training
+  # agree on what counts as turning. Note it was measured too high to ever
+  # trigger under vnm_ros/CARE driving, where cmd_vel.angular.z peaked
+  # around 0.10-0.15 rad/s during real turns.
+  turning_angular_speed_threshold_rad_s: 0.20
+  turning_stale_timeout_seconds: 1.0
+  # A raw prediction must be seen this many consecutive frames before it
+  # can switch passage_type at all (even the very first switch, e.g. right
+  # after a turn resets the debouncer), so a single noisy frame can never
+  # alone become the published value.
+  direction_min_confirm_frames: 3
+  scenario_target_labels_stale_timeout_seconds: 1.0

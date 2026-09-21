@@ -163,6 +163,7 @@ def evaluate_candidate(name, config_dir, dino_readout, use_depth, args, dino_cac
         resolve_path(dataset_config["train_data_dir"], package_root()),
         model_config["num_classes"],
         dataset_config["train_session_names"],
+        bev_grid_column=model_config.get("bev_manifest_column"),
     )
     dataset = CorridorMultiInputDataset(
         train_samples, model_config["input_size"], model_config, sequence_step=1

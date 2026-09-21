@@ -54,6 +54,7 @@ def main():
         resolve_path(data_dir, package_root()),
         model_config["num_classes"],
         args.session_names,
+        bev_grid_column=model_config.get("bev_manifest_column"),
     )
     dataset = CorridorMultiInputDataset(
         samples,

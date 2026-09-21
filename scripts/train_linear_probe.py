@@ -97,6 +97,7 @@ def load_session_features(
         resolve_path(dataset_config["test_data_dir"], package_root()),
         model_config["num_classes"],
         session_names,
+        bev_grid_column=model_config.get("bev_manifest_column"),
     )
     _, loader = build_loader(samples, model_config, dataset_config, batch_size)
     features, targets = collect_features(dino, loader, device, dino_readout, use_depth, depth_grid_size)
@@ -136,6 +137,7 @@ def main():
         resolve_path(dataset_config["train_data_dir"], package_root()),
         model_config["num_classes"],
         dataset_config["train_session_names"],
+        bev_grid_column=model_config.get("bev_manifest_column"),
     )
     _, train_loader = build_loader(train_samples, model_config, dataset_config, batch_size)
     print(f"extracting train features: {len(train_samples)} samples")

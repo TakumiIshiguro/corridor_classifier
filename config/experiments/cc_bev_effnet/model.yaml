@@ -1,0 +1,62 @@
+model:
+  architecture: rgb_depth_bev_gru
+  output_mode: passage_directions
+  model_name: vit_small_patch14_dinov2.lvd142m
+  input_size:
+  - 224
+  - 224
+  num_classes: 9
+  class_names:
+  - straight_road
+  - dead_end
+  - corner_right
+  - corner_left
+  - cross_road
+  - 3_way_right
+  - 3_way_center
+  - 3_way_left
+  - turning
+  direction_names:
+  - front
+  - left
+  - right
+  direction_thresholds:
+  - 0.5
+  - 0.5
+  - 0.5
+  turning_class_name: turning
+  device: auto
+  use_fp16: true
+  strict_checkpoint: true
+  # BEV occupancy-grid branch: a small CNN over the (2, forward_bins,
+  # lateral_bins) grid from scripts/add_bev_grid_to_dataset.py, concatenated
+  # with the RGB features before the existing fusion layer. Everything else
+  # matches cc_aug0_none, so the difference under test is this branch alone.
+  use_bev: true
+  bev_feature_dim: 64
+  bev_pool_size: 1
+  # ImageNet-pretrained backbone for the BEV branch, frozen like the RGB
+  # DINOv2 one. The scratch-trained CNN version transferred poorly to i-n
+  # (BEV-only probe 0.24 macro F1 against RGB's 0.35); this tests whether
+  # the missing ingredient is pretraining rather than capacity.
+  bev_encoder_name: efficientnet_b0.ra_in1k
+  bev_encoder_input_size: 128
+  bev_encoder_freeze: true
+  dino_readout: last_cls_regional3
+  variants:
+    rgb_depth_bev_gru:
+      checkpoint_path: weights/diagnostics/cc_bev_effnet.pth
+      sequence_length: 3
+      frame_stride: 4
+      maximum_gap_seconds: 0.4
+      use_depth: true
+      use_gru: true
+      depth_feature_dim: 128
+      depth_pool_size: 4
+      fusion_dim: 256
+      gru_hidden_size: 256
+      gru_num_layers: 1
+      depth_min_m: 0.1
+      depth_max_m: 10.0
+runtime:
+  inference_rate: 4.0

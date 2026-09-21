@@ -1,0 +1,93 @@
+model:
+  architecture: rgb_depth_gru
+  output_mode: passage_directions
+  model_name: vit_small_patch14_dinov2.lvd142m
+  input_size: [336, 336]
+  num_classes: 9
+  class_names:
+    - straight_road
+    - dead_end
+    - corner_right
+    - corner_left
+    - cross_road
+    - 3_way_right
+    - 3_way_center
+    - 3_way_left
+    - turning
+  direction_names: [front, left, right]
+  # Thresholds tuned via scripts/tune_passage_thresholds.py on g,h no
+  # longer apply: g,h are now part of the training set below (see
+  # checkpoint_path), so evaluating thresholds on them would be leakage.
+  # Flat 0.5 until a leak-free way to retune is decided (i-n is
+  # deliberately not used for this -- "spend held-out data once").
+  direction_thresholds: [0.5, 0.5, 0.5]
+  turning_class_name: turning
+  device: auto
+  use_fp16: true
+  strict_checkpoint: true
+  dino_readout: last_cls_regional3
+  # Trained on all of a-h (a_f + g + h combined; see
+  # config/experiments/rgb_depth_gru_regional3_depth4_notuning_full_ah).
+  # The previous checkpoint trained on a_f only, with g/h held out as
+  # an in-training validation split, meant the model never saw a
+  # single dead_end example (dead_end happens to be concentrated in
+  # g/h; a_f alone has zero).
+  # Retrained 2026-09-12 without any augmentation, matching vnm_ros so
+  # both packages train the same way.
+  #
+  # An a-h -> i-n sweep compared none / flip / photometric /
+  # flip+photometric. Photometric alone did score best here (macro F1
+  # 0.711 vs 0.693 for none and 0.698 for the previous flip+photometric
+  # recipe), but the whole spread was 0.018 macro F1 from a single seed.
+  # Flip never raised macro F1 at all; it only evened out the left/right
+  # F1 asymmetry (0.47/0.72 without it, 0.60/0.61 with it), trading one
+  # side's accuracy for the other's. None is the default because the
+  # differences are small enough not to justify the inconsistency, and
+  # because it is the easiest recipe to reason about. See
+  # config/experiments/cc_aug2_photo to turn photometric back on.
+  checkpoint_path: weights/production/gru_regional3_depth4_noaug.pth
+  sequence_length: 3
+  frame_stride: 4
+  # At 4 Hz inference (0.25 s period), 0.4 s tolerated essentially zero
+  # missed frames before discarding the GRU's temporal buffer, forcing a
+  # full 9-frame (~2.25 s) recollection after any brief camera/publish
+  # hiccup, not just after a real turn. Widen the margin so a couple of
+  # dropped frames don't trigger an unnecessary reset.
+  maximum_gap_seconds: 0.8
+  use_depth: true
+  use_gru: true
+  depth_feature_dim: 128
+  depth_pool_size: 4
+  fusion_dim: 256
+  gru_hidden_size: 256
+  gru_num_layers: 1
+  depth_min_m: 0.1
+  depth_max_m: 10.0
+
+runtime:
+  inference_rate: 4.0
+  # Inference is skipped entirely and passage_type publishes "turning"
+  # instead, since the model is not trained to classify passage shape
+  # mid-turn, whenever BOTH hold: scenario_navigation is commanding
+  # something other than straight ([1,0,0]) on cmd_dir_topic, AND the
+  # robot's actual cmd_vel.angular.z is at or above this threshold.
+  # cmd_dir alone is not enough (stop, [0,0,0], is "not straight" too but
+  # is not turning); cmd_vel alone is not enough either (vnm_ros/CARE's own
+  # obstacle-avoidance steering can produce a large angular velocity while
+  # scenario_navigation still commands straight); requiring both rules out
+  # CARE without a separate CARE-avoidance signal.
+  #
+  # 0.20 matches the threshold used to label "turning" when building the
+  # training dataset (dataset.yaml's
+  # turn_detection.angular_speed_threshold_rad_s), so runtime and training
+  # agree on what counts as turning. Note it was measured too high to ever
+  # trigger under vnm_ros/CARE driving, where cmd_vel.angular.z peaked
+  # around 0.10-0.15 rad/s during real turns.
+  turning_angular_speed_threshold_rad_s: 0.20
+  turning_stale_timeout_seconds: 1.0
+  # A raw prediction must be seen this many consecutive frames before it
+  # can switch passage_type at all (even the very first switch, e.g. right
+  # after a turn resets the debouncer), so a single noisy frame can never
+  # alone become the published value.
+  direction_min_confirm_frames: 3
+  scenario_target_labels_stale_timeout_seconds: 1.0

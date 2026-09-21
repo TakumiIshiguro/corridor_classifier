@@ -1,0 +1,87 @@
+model:
+  architecture: rgb_gru
+  output_mode: passage_directions
+  model_name: vit_small_patch14_dinov2.lvd142m
+  input_size:
+  - 224
+  - 224
+  num_classes: 9
+  class_names:
+  - straight_road
+  - dead_end
+  - corner_right
+  - corner_left
+  - cross_road
+  - 3_way_right
+  - 3_way_center
+  - 3_way_left
+  - turning
+  direction_names:
+  - front
+  - left
+  - right
+  direction_thresholds:
+  - 0.5
+  - 0.5
+  - 0.5
+  turning_class_name: turning
+  device: auto
+  use_fp16: true
+  strict_checkpoint: true
+  # RGB + BEV, no depth branch: the BEV grid is derived from the same
+  # depth map, so feeding both is redundant -- and the depth branch
+  # was already shown to contribute little (shuffling depth across
+  # samples cost only 0.009 macro F1, see
+  # config/experiments/DEPTH_MODALITY_COMPARISON.md).
+  # BEV occupancy-grid branch: a small CNN over the (2, forward_bins,
+  # lateral_bins) grid from scripts/add_bev_grid_to_dataset.py, concatenated
+  # with the RGB features before the existing fusion layer. Everything else
+  # matches cc_aug0_none, so the difference under test is this branch alone.
+  #
+  # FLOOR band, not the wall band every earlier BEV config used. The grid is
+  # built with --minimum-height-m -0.30 --maximum-height-m -0.05, which keeps
+  # the ground plane (median height -0.106 m) and drops the walls, inverting
+  # the usual filter.
+  #
+  # The wall band encodes a side opening only as a gap in the wall -- an
+  # absence, in the part of the image where the depth estimate is sparsest,
+  # which is also what sensor dropout and occlusion produce. That matches
+  # where wall BEV lost: right F1 0.664 against 0.776 for RGB+depth. The
+  # floor band turns the same opening into observed floor extending
+  # sideways, so it takes a false measurement rather than a missing one to
+  # fake it. Floor is also far denser: 40% of all points against the wall
+  # band's 27%, and 751-2043 occupied cells per frame against 112-332.
+  # See runs/bev_inspection/floor_vs_wall.png and floor_bev_class_mean.png.
+  # Control: no BEV branch at all. If this scores the same as cc_rgbonly_ep7
+  # and cc_bev5m_ep7, the BEV branch was contributing nothing and every
+  # earlier BEV comparison was really measuring RGB alone.
+  use_bev: false
+  bev_feature_dim: 64
+  bev_pool_size: 1
+  # Binary occupancy (0/1) instead of raw point counts: counts track
+  # 1/distance^2, re-encoding the distance the cell index already carries
+  # plus per-environment surface/density variation.
+  bev_binary: true
+  # 0.1-5.1 m forward x +-3.5 m lateral on a 50x70 grid: 0.10 m square cells,
+  # the same geometry as cc_bev5m so only the height band differs.
+  #
+  # 5, against 80 for the wall band. Floor cells hold far more points (per
+  # cell p50 22, p90 243), and the threshold behaves differently here: 5
+  # drops isolated noise almost for free (1155 -> 1054 occupied cells,
+  # forward reach 4.93 -> 4.90 m) while 10 already starts eroding the far
+  # field (724 cells) and 80 would cut the map back to 2.39 m.
+  bev_min_points: 5
+
+  dino_readout: last_cls_regional3
+  # Flattened (no variants block): this config has exactly one architecture.
+  checkpoint_path: weights/diagnostics/cc_rgbonly_ep7.pth
+  sequence_length: 3
+  frame_stride: 4
+  maximum_gap_seconds: 0.4
+  use_depth: false
+  use_gru: true
+  fusion_dim: 256
+  gru_hidden_size: 256
+  gru_num_layers: 1
+runtime:
+  inference_rate: 4.0

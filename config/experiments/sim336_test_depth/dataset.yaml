@@ -1,0 +1,43 @@
+# Depth generation only, for the existing 336px sim i-n split
+# (dataset/corridor_336/test), which was collected RGB-only.
+# Originally: 336px collection of the real bags, bridge as
+# config/experiments/real_turning_bridge (4.0 s). bag_path and
+# session_name are overridden per session on the command line.
+paths:
+  dataset_dir: dataset/corridor_336
+
+collection:
+  source: bag
+  bag_path: /home/takumi/bags/real/a-f.bag
+  dataset_type: train
+  session_name: ""
+  sample_dt: 0.25
+  label_timeout: 0.5
+  image_format: jpg
+  jpeg_quality: 95
+
+turn_detection:
+  enabled: true
+  source_num_classes: 8
+  class_name: turning
+  pose_topic: /mcl_pose
+  angular_speed_threshold_rad_s: 0.20
+  window_seconds: 1.0
+  minimum_duration_seconds: 0.5
+  padding_seconds: 0.25
+  maximum_pose_gap_seconds: 0.5
+  post_turn_next_label_max_seconds: 6.0
+  # Raised from 1.5: two turns in the real a_f session were split in
+  # two by 2.8 s and 3.0 s stretches where the measured angular speed
+  # dipped under the 0.20 rad/s gate, giving 26 turning segments where
+  # sim has 24 for the same route. The next-shortest gap between
+  # genuinely separate turns is 29.9 s, so 4.0 bridges the splits with
+  # a wide margin and cannot merge two real turns.
+  turning_gap_bridge_max_seconds: 4.0
+
+depth_generation:
+  # Empty selects every session in dataset_types.
+  dataset_types: [test]
+  session_names: []   # 空 = dataset_types 内の全セッション
+  unidepth_config_file: ../UniDepth/unidepth_ros/config/unidepth.yaml
+  stamp_tolerance_seconds: 0.01

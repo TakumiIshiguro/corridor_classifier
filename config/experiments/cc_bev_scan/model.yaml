@@ -1,0 +1,62 @@
+model:
+  architecture: rgb_bev_gru
+  output_mode: passage_directions
+  model_name: vit_small_patch14_dinov2.lvd142m
+  input_size:
+  - 224
+  - 224
+  num_classes: 9
+  class_names:
+  - straight_road
+  - dead_end
+  - corner_right
+  - corner_left
+  - cross_road
+  - 3_way_right
+  - 3_way_center
+  - 3_way_left
+  - turning
+  direction_names:
+  - front
+  - left
+  - right
+  direction_thresholds:
+  - 0.5
+  - 0.5
+  - 0.5
+  turning_class_name: turning
+  device: auto
+  use_fp16: true
+  strict_checkpoint: true
+  # RGB + BEV, no depth branch: the BEV grid is derived from the same
+  # depth map, so feeding both is redundant -- and the depth branch
+  # was already shown to contribute little (shuffling depth across
+  # samples cost only 0.009 macro F1, see
+  # config/experiments/DEPTH_MODALITY_COMPARISON.md).
+  # BEV occupancy-grid branch: a small CNN over the (2, forward_bins,
+  # lateral_bins) grid from scripts/add_bev_grid_to_dataset.py, concatenated
+  # with the RGB features before the existing fusion layer. Everything else
+  # matches cc_aug0_none, so the difference under test is this branch alone.
+  use_bev: true
+  # The (64, 2) nearest-obstacle scan rather than the 16x32 occupancy grid:
+  # 128 numbers instead of 1024, run through a 1D CNN. The grid version
+  # overfit (i-n 0.7066 against the RGB+depth baseline's 0.7608), so this
+  # asks whether the lower-dimensional scan fares better at this data size.
+  bev_source: scan
+  bev_max_range_m: 8.0
+  bev_lateral_limit_m: 4.0
+  bev_feature_dim: 64
+  bev_pool_size: 1
+  dino_readout: last_cls_regional3
+  # Flattened (no variants block): this config has exactly one architecture.
+  checkpoint_path: weights/diagnostics/cc_bev_scan.pth
+  sequence_length: 3
+  frame_stride: 4
+  maximum_gap_seconds: 0.4
+  use_depth: false
+  use_gru: true
+  fusion_dim: 256
+  gru_hidden_size: 256
+  gru_num_layers: 1
+runtime:
+  inference_rate: 4.0

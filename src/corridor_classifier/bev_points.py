@@ -53,6 +53,47 @@ def bev_occupancy_grid(
     return grid
 
 
+def points_from_cloud(message) -> np.ndarray:
+    """Read an (N, 3) float32 array out of a PointCloud2 without a loop.
+
+    point_cloud2.read_points yields one tuple per point, which costs 63 ms
+    for the ~148k points the BEV band holds. The payload is already a
+    contiguous float32 buffer whenever x/y/z are FLOAT32, so it can be
+    viewed directly; anything else falls back to the slow path.
+    """
+    fields = {field.name: field for field in message.fields}
+    try:
+        from sensor_msgs.msg import PointField
+
+        float32 = PointField.FLOAT32
+    except ImportError:
+        float32 = 7
+    offsets = []
+    for name in ("x", "y", "z"):
+        field = fields.get(name)
+        if field is None or field.datatype != float32 or field.count != 1:
+            offsets = []
+            break
+        offsets.append(field.offset)
+    stride = int(message.point_step)
+    if offsets and stride % 4 == 0 and all(o % 4 == 0 for o in offsets):
+        buffer = np.frombuffer(message.data, dtype=np.float32)
+        buffer = buffer[: (buffer.size // (stride // 4)) * (stride // 4)]
+        columns = buffer.reshape(-1, stride // 4)
+        return np.ascontiguousarray(columns[:, [o // 4 for o in offsets]])
+
+    from sensor_msgs import point_cloud2
+
+    return np.array(
+        list(
+            point_cloud2.read_points(
+                message, field_names=("x", "y", "z"), skip_nans=True
+            )
+        ),
+        dtype=np.float32,
+    ).reshape(-1, 3)
+
+
 class LatestBevGridSubscriber:
     """Keeps the most recent BEV grid, binned as messages arrive."""
 
@@ -82,16 +123,7 @@ class LatestBevGridSubscriber:
         )
 
     def _callback(self, message) -> None:
-        from sensor_msgs import point_cloud2
-
-        points = np.array(
-            list(
-                point_cloud2.read_points(
-                    message, field_names=("x", "y", "z"), skip_nans=True
-                )
-            ),
-            dtype=np.float32,
-        )
+        points = points_from_cloud(message)
         grid = bev_occupancy_grid(
             points,
             self.forward_range_m,

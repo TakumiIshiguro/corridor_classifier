@@ -97,7 +97,7 @@ runtime:
   inference_rate: 4.0
   # Skip inference and reset temporal history when RGB/BEV capture times
   # differ by more than this limit (four periods at 4 Hz).
-  bev_max_time_difference_seconds: 1.0
+  bev_max_time_difference_seconds: 0.5
   # Inference is skipped entirely and passage_type publishes "turning"
   # instead, since the model is not trained to classify passage shape
   # mid-turn, whenever BOTH hold: scenario_navigation is commanding
@@ -109,13 +109,19 @@ runtime:
   # scenario_navigation still commands straight); requiring both rules out
   # CARE without a separate CARE-avoidance signal.
   #
-  # 0.20 matches the threshold used to label "turning" when building the
-  # training dataset (dataset.yaml's
-  # turn_detection.angular_speed_threshold_rad_s), so runtime and training
-  # agree on what counts as turning. Note it was measured too high to ever
-  # trigger under vnm_ros/CARE driving, where cmd_vel.angular.z peaked
-  # around 0.10-0.15 rad/s during real turns.
-  turning_angular_speed_threshold_rad_s: 0.20
+  # 0.07, not the 0.20 that matches how the training set was labelled
+  # (dataset.yaml's turn_detection.angular_speed_threshold_rad_s). 0.20
+  # never fired: the deployed NoMaD model turns at a measured median
+  # 0.10 rad/s, so passage_type kept reporting corridor shapes right
+  # through a turn instead of "turning". scenario_navigation's executor
+  # reads those as the junction the turn leads into and can finish the
+  # turn while the robot is still rotating in the junction it set out to
+  # turn at -- the one case its minimum-turn-time floor cannot catch.
+  #
+  # 0.07 sits between the two: straight driving commands 0.003-0.04 rad/s
+  # and turns 0.10. The gate also requires a non-straight cmd_dir, so
+  # nothing here can fire while driving straight regardless.
+  turning_angular_speed_threshold_rad_s: 0.07
   turning_stale_timeout_seconds: 1.0
   # A raw prediction must be seen this many consecutive frames before it
   # can switch passage_type at all (even the very first switch, e.g. right

@@ -138,23 +138,34 @@ def test_holdout_evaluation_respects_bev_manifest_column(monkeypatch):
     assert observed.get("bev_grid_column") == config["model"]["bev_manifest_column"]
 
 
-@pytest.mark.parametrize("bev_stamp,expected_calls", [
-    (10., 1), (9., 1), (11., 1), (8.999, 0), (11.001, 0),
-    (1., 0), (None, 0), (float("nan"), 0), (float("inf"), 0),
-    ("missing_grid", 0), ((10., 1., 10.), 2),
+@pytest.mark.parametrize("max_time_difference", [0.5, 1.0])
+@pytest.mark.parametrize("bev_offset,expected_calls", [
+    (0., 1), (-1., 1), (1., 1), (-1.001, 0), (1.001, 0),
+    (-9., 0), (None, 0), (float("nan"), 0), (float("inf"), 0),
+    ("missing_grid", 0), ((0., -9., 0.), 2),
 ])
-def test_ros_node_does_not_infer_with_stale_bev(monkeypatch, bev_stamp, expected_calls):
+def test_ros_node_does_not_infer_with_stale_bev(
+    monkeypatch, max_time_difference, bev_offset, expected_calls
+):
     for dependency in ("rospy", "cv_bridge", "scenario_navigation_msgs.msg"):
         pytest.importorskip(dependency)
     node = load_script("corridor_classifier_node")
     debouncer = Mock()
     monkeypatch.setattr(node, "ConsecutiveConfirmDebouncer", lambda **kwargs: debouncer)
     config = load_config()
+    # Test the configured limit independently of the deployed YAML value.
+    # Numeric offsets are multiples of this limit relative to the RGB stamp.
+    config["runtime"]["bev_max_time_difference_seconds"] = max_time_difference
     monkeypatch.setattr(node, "load_config", lambda _: config)
     monkeypatch.setattr(node, "_apply_ros_overrides", lambda _: None)
     # The file itself is covered separately by the real checkpoint smoke test.
     monkeypatch.setattr(node.os.path, "isfile", lambda _: True)
-    stamps = bev_stamp if isinstance(bev_stamp, tuple) else (bev_stamp,)
+    offsets = bev_offset if isinstance(bev_offset, tuple) else (bev_offset,)
+    stamps = tuple(
+        10. + offset * max_time_difference
+        if isinstance(offset, (int, float)) else offset
+        for offset in offsets
+    )
     stopping = iter([False] * len(stamps) + [True])
     ros = SimpleNamespace(init_node=Mock(), get_param=lambda key, default: default,
                           Publisher=Mock(), Rate=Mock(), loginfo=Mock(),

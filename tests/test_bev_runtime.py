@@ -182,7 +182,6 @@ def test_ros_node_does_not_infer_with_stale_bev(
     )
     monkeypatch.setattr(node, "CorridorPredictor", lambda *args: classifier)
     monkeypatch.setattr(node, "CmdDirTurningGate", lambda **kwargs: SimpleNamespace(is_turning=lambda: False))
-    monkeypatch.setattr(node, "ScenarioTargetLabelsSubscriber", lambda **kwargs: Mock())
     message = SimpleNamespace(header=SimpleNamespace(stamp=SimpleNamespace(to_sec=lambda: 10.)))
     monkeypatch.setattr(node, "LatestImageSubscriber", lambda _: SimpleNamespace(take_latest=lambda: message))
     readings = iter([

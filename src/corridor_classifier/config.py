@@ -265,14 +265,10 @@ def _validate_config(config: Dict[str, Any]) -> None:
         )
     runtime["turning_angular_speed_threshold_rad_s"] = threshold
 
-    for key, default in (
-        ("turning_stale_timeout_seconds", 1.0),
-        ("scenario_target_labels_stale_timeout_seconds", 1.0),
-    ):
-        value = float(runtime.get(key, default))
-        if value <= 0.0:
-            raise ValueError(f"runtime.{key} must be positive")
-        runtime[key] = value
+    value = float(runtime.get("turning_stale_timeout_seconds", 1.0))
+    if value <= 0.0:
+        raise ValueError("runtime.turning_stale_timeout_seconds must be positive")
+    runtime["turning_stale_timeout_seconds"] = value
 
     bev_time_difference = float(runtime.get("bev_max_time_difference_seconds", 1.0))
     if not math.isfinite(bev_time_difference) or bev_time_difference <= 0.0:
@@ -296,12 +292,9 @@ def _validate_config(config: Dict[str, Any]) -> None:
         raise ValueError(f"topics config is missing keys: {', '.join(missing)}")
 
     # Runtime-only topics, defaulted for the same backward-compatibility
-    # reason as the runtime keys above. scenario_target_labels_topic stays
-    # empty by default: it is only set when running alongside
-    # scenario_navigation.
+    # reason as the runtime keys above.
     topics.setdefault("cmd_dir_topic", "/cmd_dir_intersection")
     topics.setdefault("cmd_vel_topic", "/cmd_vel")
-    topics.setdefault("scenario_target_labels_topic", "")
 
 
 def _validate_bev_grid(bev_grid: Dict[str, Any], model: Dict[str, Any]) -> None:

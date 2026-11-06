@@ -128,4 +128,3 @@ runtime:
   # after a turn resets the debouncer), so a single noisy frame can never
   # alone become the published value.
   direction_min_confirm_frames: 3
-  scenario_target_labels_stale_timeout_seconds: 1.0

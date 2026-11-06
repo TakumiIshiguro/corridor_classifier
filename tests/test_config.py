@@ -41,14 +41,12 @@ def test_default_config_has_nine_unique_classes_including_turning():
         "turning_angular_speed_threshold_rad_s": 0.07,
         "turning_stale_timeout_seconds": 1.0,
         "direction_min_confirm_frames": 3,
-        "scenario_target_labels_stale_timeout_seconds": 1.0,
     }
     assert config["topics"]["image_topic"] == "/camera_center/image_raw"
     assert config["topics"]["label_topic"] == "/cmd_dir_intersection"
     assert config["topics"]["passage_type_topic"] == "/passage_type"
     assert config["topics"]["cmd_dir_topic"] == "/cmd_dir_intersection"
     assert config["topics"]["cmd_vel_topic"] == "/cmd_vel"
-    assert config["topics"]["scenario_target_labels_topic"] == ""
 
 
 def test_resolve_path_uses_package_root_for_relative_path():

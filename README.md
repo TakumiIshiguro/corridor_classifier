@@ -74,6 +74,16 @@ turningを予測しないため、`intersection_name`が`turning`になること
 
 トピック名は`config/topics.yaml`で変更できます。
 
+### BEVと通路クラスの可視化
+
+分類器が入力に使うBEVグリッドに、通路クラスと左・前・右が空いているかを重ねて表示します。
+
+```bash
+roslaunch corridor_classifier corridor_bev_overlay.launch
+```
+
+画像は`/corridor_classifier/bev_overlay`に出力します。壁は`bev_min_points`と`bev_binary`を適用した、学習器への入力と同じセルを表示します。`/passage_type`が1秒以上届かないと`STALE`を表示します。
+
 ## Requirements
 
 - ROS Noetic

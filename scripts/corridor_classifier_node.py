@@ -22,7 +22,6 @@ from corridor_classifier.messages import (
 from corridor_classifier.models import CorridorPredictor
 from corridor_classifier.passage_directions import class_name_from_directions
 from corridor_classifier.bev_points import LatestBevGridSubscriber
-from corridor_classifier.scenario_target_labels import ScenarioTargetLabelsSubscriber
 from corridor_classifier.synchronized_subscriber import (
     LatestRgbDepthSubscriber,
 )
@@ -101,16 +100,6 @@ def main():
             runtime["turning_angular_speed_threshold_rad_s"]
         ),
         stale_timeout_seconds=float(runtime["turning_stale_timeout_seconds"]),
-    )
-    # Empty by default (disabled): only set when running alongside
-    # scenario_navigation, so a raw prediction matching the destination the
-    # active turn step leads into can be published immediately instead of
-    # "turning" while still mid-turn (see scenario_target_labels.py).
-    scenario_target_labels = ScenarioTargetLabelsSubscriber(
-        topic=str(topics["scenario_target_labels_topic"]),
-        stale_timeout_seconds=float(
-            runtime["scenario_target_labels_stale_timeout_seconds"]
-        ),
     )
     bridge = CvBridge()
     # The BEV grid arrives on its own topic rather than being rebuilt here:
@@ -275,21 +264,9 @@ def main():
             continue
         if classifier.output_mode == "passage_directions":
             if turning:
-                # If the turn step's destination is already visible and
-                # recognized, publish it now instead of "turning" -- no
-                # need to wait for cmd_vel to settle back down first.
-                # scenario_navigation's turnFinish() still requires
-                # turning_observed_this_step_ (a genuine turn already
-                # underway) before it will act on this, so a turn that
-                # never really happened still cannot complete the step.
-                reached_destination = scenario_target_labels.contains(
-                    prediction.class_name
-                )
                 passage_publisher.publish(
                     make_passage_message(
-                        classifier.class_names.index(prediction.class_name)
-                        if reached_destination
-                        else turning_index,
+                        turning_index,
                         classifier.class_names,
                     )
                 )
@@ -300,17 +277,14 @@ def main():
                 )
                 visualization_publisher.publish(
                     make_label_image_message(
-                        prediction.class_name
-                        if reached_destination
-                        else f"{prediction.class_name} (turning)",
+                        f"{prediction.class_name} (turning)",
                         bridge,
                     )
                 )
                 rospy.loginfo_throttle(
                     1.0,
-                    "corridor(raw,turning,reached_destination=%s)=%s "
+                    "corridor(raw,turning)=%s "
                     "open(raw)=%s probabilities=(%.3f,%.3f,%.3f)",
-                    reached_destination,
                     prediction.class_name,
                     prediction.open_directions,
                     *prediction.direction_probabilities,
@@ -351,16 +325,9 @@ def main():
         else:
             if turning:
                 raw_class_name = classifier.class_names[prediction.class_index]
-                # See the passage_directions branch above for why this
-                # bypasses "turning" -- same idea, just class-mode.
-                reached_destination = scenario_target_labels.contains(
-                    raw_class_name
-                )
                 passage_publisher.publish(
                     make_passage_message(
-                        prediction.class_index
-                        if reached_destination
-                        else turning_index,
+                        turning_index,
                         classifier.class_names,
                     )
                 )
@@ -369,16 +336,13 @@ def main():
                 )
                 visualization_publisher.publish(
                     make_label_image_message(
-                        raw_class_name
-                        if reached_destination
-                        else f"{raw_class_name} (turning)",
+                        f"{raw_class_name} (turning)",
                         bridge,
                     )
                 )
                 rospy.loginfo_throttle(
                     1.0,
-                    "corridor(raw,turning,reached_destination=%s)=%s confidence=%.3f",
-                    reached_destination,
+                    "corridor(raw,turning)=%s confidence=%.3f",
                     raw_class_name,
                     prediction.confidence,
                 )

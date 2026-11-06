@@ -24,7 +24,6 @@ from corridor_classifier.image_subscriber import LatestImageSubscriber
 from corridor_classifier.linear_probe import RidgeLinearProbePredictor
 from corridor_classifier.messages import make_direction_passage_message, make_passage_message
 from corridor_classifier.passage_directions import class_name_from_directions
-from corridor_classifier.scenario_target_labels import ScenarioTargetLabelsSubscriber
 from corridor_classifier.synchronized_subscriber import LatestRgbDepthSubscriber
 from corridor_classifier.turning_gate import CmdDirTurningGate
 from corridor_classifier.visualization import make_label_image_message
@@ -79,16 +78,6 @@ def main():
         cmd_vel_topic=cmd_vel_topic,
         threshold_rad_s=turning_threshold,
         stale_timeout_seconds=turning_stale_timeout,
-    )
-    # Empty by default (disabled): only set when running alongside
-    # scenario_navigation, so a raw prediction matching the destination the
-    # active turn step leads into can be published immediately instead of
-    # "turning" while still mid-turn (see scenario_target_labels.py).
-    scenario_target_labels = ScenarioTargetLabelsSubscriber(
-        topic=str(rospy.get_param("~scenario_target_labels_topic", "")),
-        stale_timeout_seconds=float(
-            rospy.get_param("~scenario_target_labels_stale_timeout_seconds", 1.0)
-        ),
     )
     bridge = CvBridge()
     if predictor.use_depth:
@@ -158,21 +147,9 @@ def main():
         # visibility.
         prediction = predictor.predict(PILImage.fromarray(rgb_image), depth_meters=depth_image)
         if turning:
-            # If the turn step's destination is already visible and
-            # recognized, publish it now instead of "turning" -- no need
-            # to wait for cmd_vel to settle back down first.
-            # scenario_navigation's turnFinish() still requires
-            # turning_observed_this_step_ (a genuine turn already
-            # underway) before it will act on this, so a turn that never
-            # really happened still cannot complete the step.
-            reached_destination = scenario_target_labels.contains(
-                prediction.class_name
-            )
             passage_publisher.publish(
                 make_passage_message(
-                    predictor.class_names.index(prediction.class_name)
-                    if reached_destination
-                    else turning_index,
+                    turning_index,
                     predictor.class_names,
                 )
             )
@@ -181,16 +158,13 @@ def main():
             )
             visualization_publisher.publish(
                 make_label_image_message(
-                    prediction.class_name
-                    if reached_destination
-                    else f"{prediction.class_name} (turning)",
+                    f"{prediction.class_name} (turning)",
                     bridge,
                 )
             )
             rospy.loginfo_throttle(
                 1.0,
-                "corridor(raw,turning,reached_destination=%s)=%s open(raw)=%s scores=(%.3f,%.3f,%.3f)",
-                reached_destination,
+                "corridor(raw,turning)=%s open(raw)=%s scores=(%.3f,%.3f,%.3f)",
                 prediction.class_name,
                 prediction.open_directions,
                 *prediction.direction_scores,

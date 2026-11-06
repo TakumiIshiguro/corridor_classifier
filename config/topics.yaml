@@ -9,13 +9,6 @@ visualization_topic: /corridor_classifier/visualization
 # angular velocity crosses runtime.turning_angular_speed_threshold_rad_s.
 cmd_dir_topic: /cmd_dir_intersection
 cmd_vel_topic: /cmd_vel
-# scenario_navigation's cmd_dir_executor publishes the intersection labels
-# (comma-separated, std_msgs/String) that currently satisfy the active
-# target; while a turn step is active it looks ahead to the step the turn
-# leads into. A raw prediction matching one of them while still turning is
-# published immediately instead of "turning". Leave empty to disable --
-# also harmless when nothing publishes the topic.
-scenario_target_labels_topic: ""
 # Robot-frame point cloud for the BEV occupancy grid, published by
 # unidepth_ros from its `bev_projection` bounds. Separate from the CARE
 # clouds vnm_ros consumes: those are cropped to 1 m ahead and

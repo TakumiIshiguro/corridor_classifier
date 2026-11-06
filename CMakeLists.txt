@@ -26,6 +26,7 @@ catkin_install_python(PROGRAMS
   scripts/add_depth_to_dataset.py
   scripts/add_bev_to_dataset.py
   scripts/create_dataset.py
+  scripts/corridor_bev_overlay.py
   scripts/corridor_classifier_node.py
   scripts/evaluate_session_holdout.py
   scripts/fit_production_linear_probe.py

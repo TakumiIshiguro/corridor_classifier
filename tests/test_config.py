@@ -29,7 +29,7 @@ def test_default_config_has_nine_unique_classes_including_turning():
     assert config["model"]["frame_stride"] == 4
     assert config["model"]["input_size"] == [224, 224]
     assert config["model"]["num_classes"] == 9
-    assert config["model"]["dino_readout"] == "last_cls_regional3"
+    assert config["model"]["dino_readout"] == "last_cls_regional3_center"
     # config/ holds the deployed settings directly, with no variants block
     # to select from.
     assert "variants" not in config["model"]

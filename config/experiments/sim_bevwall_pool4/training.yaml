@@ -1,0 +1,51 @@
+dataset:
+  train_data_dir: dataset/corridor/train
+  train_session_names: [session_20260811_010115]
+  # test_data_dir: dataset/corridor/test
+  test_session_names: []
+  num_workers: 4
+
+training:
+  epochs: 10
+  batch_size_by_architecture:
+    rgb: 64
+    rgb_gru: 16
+    rgb_depth: 32
+    rgb_depth_gru: 8
+    # The BEV branch is a 0.355 M CNN over a 50x70 grid, far lighter than
+    # the depth branch it replaces, so these match their non-BEV twins.
+    rgb_bev: 64
+    rgb_bev_gru: 16
+    rgb_depth_bev: 32
+    rgb_depth_bev_gru: 8
+  use_test: false
+  use_amp: true
+  seed: 0
+
+  # Keep the backbone frozen for all 10 epochs.
+  freeze_backbone_epochs: 10
+  unfreeze_schedule: []
+  # Example of gradual unfreezing:
+  #   - epoch: 6
+  #     last_blocks: 2
+  #   - epoch: 16
+  #     last_blocks: 4
+  #   - epoch: 26
+  #     last_blocks: 12
+
+  pretrained_weights_path: weights/dinov2_vits14_pretrain.pth
+  run_root: runs/corridor_classifier
+
+optimizer:
+  name: adamw
+  head_learning_rate: 0.001
+  backbone_learning_rate: 0.00001
+  weight_decay: 0.0001
+  betas: [0.9, 0.999]
+  epsilon: 1.0e-8
+
+scheduler:
+  name: cosine
+  warmup_epochs: 1
+  warmup_start_factor: 0.1
+  min_learning_rate_ratio: 0.01

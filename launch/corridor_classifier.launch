@@ -16,7 +16,7 @@
        starting UniDepth twice. -->
   <arg name="start_depth_estimator" default="false"/>
   <arg name="unidepth_config_file"
-       default="$(find unidepth_ros)/config/unidepth.yaml"/>
+       default="$(find unidepth_ros)/config/unidepth_real.yaml"/>
   <arg name="unidepth_model_path_override" default=""/>
   <arg name="unidepth_device_override" default=""/>
   <arg name="unidepth_inference_rate_override" default="0.0"/>

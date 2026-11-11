@@ -1,16 +1,15 @@
 model:
-  # RGB + a bird's-eye wall-occupancy grid, no depth map. On the unseen
-  # area (i-n) this scores 0.775 macro F1 against 0.749 for the RGB+depth
-  # recipe it replaces, over two seeds whose ranges do not overlap, and
-  # 0.694 for what was deployed before (that one also trained 16 epochs;
-  # see `epochs` in config/experiments/cc_real_turnfix_ep7/training.yaml
-  # for why 7 is now the number). Full write-up in
-  # config/experiments/BEV_REPRESENTATION_DECISION.md.
+  # Real-robot deployment: RGB + a bird's-eye wall-occupancy grid, trained
+  # on the real high-rise sessions (a_f, g, h) with the recipe of
+  # config/experiments/cc_real_h_s2_lr5_c6 (window step 2, head lr 5e-5,
+  # BEV pose shift and flip, 5/6/5 regional readout). Run UniDepth with
+  # unidepth_ros/config/unidepth_real.yaml: the real grids use a 0.18-1.75 m
+  # height band. The checkpoint is not tracked in git; copy
+  # weights/diagnostics/cc_real_h_s2_lr5_c6.pth separately.
   #
-  # Trained on sim (a_f, g, h). A real-trained BEV model does not exist
-  # yet; for the real robot use weights/production/real_turnfix_ep7.pth,
-  # which is RGB+depth and needs `architecture: rgb_depth_gru` with the
-  # depth block below restored.
+  # For Gazebo, point config_dir at config/experiments/h_s2_lr5_c6 (the
+  # same recipe trained on sim) or config/experiments/sim_bevwall_pool4
+  # (the previous sim default).
   architecture: rgb_bev_gru
   output_mode: passage_directions
   model_name: vit_small_patch14_dinov2.lvd142m
@@ -43,8 +42,8 @@ model:
   device: auto
   use_fp16: true
   strict_checkpoint: true
-  dino_readout: last_cls_regional3
-  checkpoint_path: weights/production/bevwall_pool4.pth
+  dino_readout: last_cls_regional3_center
+  checkpoint_path: weights/diagnostics/cc_real_h_s2_lr5_c6.pth
   sequence_length: 3
   frame_stride: 4
   # At 4 Hz inference (0.25 s period), 0.4 s tolerated essentially zero

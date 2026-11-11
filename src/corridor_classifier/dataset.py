@@ -1,4 +1,5 @@
 import csv
+import math
 import os
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -228,6 +229,51 @@ def bev_scan_to_tensor(
     return torch.from_numpy(stacked.astype(np.float32))
 
 
+def perturb_bev_pose(
+    grid: torch.Tensor,
+    lateral_shift_m: float,
+    yaw_rad: float,
+    forward_range_m: Sequence[float],
+    map_width_m: float,
+) -> torch.Tensor:
+    """Redraw a (C, F, L) BEV grid as seen from a nearby robot pose.
+
+    The robot moves `lateral_shift_m` to its left and turns `yaw_rad` to its
+    left. Cells are resampled with nearest neighbour, so occupancy stays
+    binary, and cells with no source stay empty.
+    """
+    _, forward_bins, lateral_bins = grid.shape
+    forward_min, forward_max = float(forward_range_m[0]), float(forward_range_m[1])
+    forward_step = (forward_max - forward_min) / forward_bins
+    lateral_step = float(map_width_m) / lateral_bins
+    forward = forward_min + (torch.arange(forward_bins).float() + 0.5) * forward_step
+    left = -float(map_width_m) / 2.0 + (torch.arange(lateral_bins).float() + 0.5) * lateral_step
+    forward, left = torch.meshgrid(forward, left, indexing="ij")
+    cosine, sine = math.cos(yaw_rad), math.sin(yaw_rad)
+    source_forward = forward * cosine - left * sine
+    source_left = forward * sine + left * cosine + float(lateral_shift_m)
+    forward_index = ((source_forward - forward_min) / forward_step).floor().long()
+    lateral_index = (
+        (source_left + float(map_width_m) / 2.0) / lateral_step
+    ).floor().long()
+    valid = (
+        (forward_index >= 0)
+        & (forward_index < forward_bins)
+        & (lateral_index >= 0)
+        & (lateral_index < lateral_bins)
+    )
+    output = torch.zeros_like(grid)
+    output[:, valid] = grid[:, forward_index[valid], lateral_index[valid]]
+    return output
+
+
+def shift_image_columns(image: torch.Tensor, pixels: int) -> torch.Tensor:
+    """Move an image `pixels` columns right, repeating the edge column."""
+    width = image.shape[-1]
+    source = (torch.arange(width) - int(pixels)).clamp(0, width - 1)
+    return image[..., source]
+
+
 class CorridorMultiInputDataset(Dataset):
     def __init__(
         self,
@@ -314,6 +360,22 @@ class CorridorMultiInputDataset(Dataset):
         self.depth_scale_jitter = float(
             augmentation.get("depth_scale_jitter", 0.0)
         )
+        # A robot driving itself does not stay on the recorded centre line.
+        # These redraw the whole sequence from one nearby pose so the model
+        # sees the same passage off-centre and slightly turned. RGB follows
+        # the yaw only: the sideways parallax has no image-space equivalent.
+        self.bev_lateral_shift_m = float(
+            augmentation.get("bev_lateral_shift_m", 0.0)
+        )
+        self.bev_yaw_degrees = float(augmentation.get("bev_yaw_degrees", 0.0))
+        self.rgb_pixels_per_degree = float(
+            augmentation.get("rgb_pixels_per_degree", 0.0)
+        )
+        bev_grid = dict(variant_config.get("bev_grid", {}))
+        self.bev_forward_range_m = tuple(
+            bev_grid.get("forward_range_m", (0.1, 5.1))
+        )
+        self.bev_map_width_m = float(bev_grid.get("map_width_m", 7.0))
         color_jitter = augmentation.get("color_jitter", {})
         self.color_jitter = transforms.ColorJitter(
             brightness=float(color_jitter.get("brightness", 0.0)),
@@ -451,6 +513,12 @@ class CorridorMultiInputDataset(Dataset):
     def __getitem__(self, index):
         sequence = self.sequences[index]
         flip = random.random() < self.horizontal_flip_probability
+        lateral_shift_m = random.uniform(
+            -self.bev_lateral_shift_m, self.bev_lateral_shift_m
+        )
+        yaw_degrees = random.uniform(
+            -self.bev_yaw_degrees, self.bev_yaw_degrees
+        )
         rgb_augmentation = (
             self._sample_rgb_augmentation()
             if self.sequence_consistent_augmentation
@@ -464,6 +532,11 @@ class CorridorMultiInputDataset(Dataset):
                 ]
             )
         }
+        if self.rgb_pixels_per_degree > 0.0:
+            inputs["rgb"] = shift_image_columns(
+                inputs["rgb"],
+                round(yaw_degrees * self.rgb_pixels_per_degree),
+            )
         if (
             self.rgb_dropout_probability > 0.0
             and random.random() < self.rgb_dropout_probability
@@ -530,6 +603,14 @@ class CorridorMultiInputDataset(Dataset):
                     )
                 if self.bev_drop_height:
                     g = g[:1]
+                if lateral_shift_m != 0.0 or yaw_degrees != 0.0:
+                    g = perturb_bev_pose(
+                        g,
+                        lateral_shift_m,
+                        math.radians(yaw_degrees),
+                        self.bev_forward_range_m,
+                        self.bev_map_width_m,
+                    )
                 grids.append(g)
             inputs["bev"] = torch.stack(grids)
         label = sequence[-1].class_index

@@ -1,0 +1,50 @@
+dataset:
+  num_workers: 4
+  train_data_dir: dataset/corridor/real_turnfix/train
+  train_sequence_step: 2
+  train_session_names:
+  - a_f
+  - g
+  - h
+optimizer:
+  backbone_learning_rate: 1.0e-06
+  betas:
+  - 0.9
+  - 0.999
+  epsilon: 1.0e-08
+  head_learning_rate: 5.0e-05
+  name: adamw
+  weight_decay: 0.01
+scheduler:
+  min_learning_rate_ratio: 0.1
+  name: cosine
+  warmup_epochs: 2
+  warmup_start_factor: 0.1
+training:
+  augmentation:
+    blur_probability: 0.0
+    color_jitter:
+      brightness: 0.0
+      contrast: 0.0
+      saturation: 0.0
+      hue: 0.0
+    depth_scale_jitter: 0.0
+    grayscale_probability: 0.0
+    horizontal_flip_probability: 0.5
+    bev_lateral_shift_m: 0.7
+    bev_yaw_degrees: 6.0
+    rgb_pixels_per_degree: 0.5
+    sequence_consistent: true
+  batch_size: 8
+  checkpoint_metric: train_passage_macro_f1
+  direction_loss_weight: 1.0
+  epochs: 7
+  freeze_backbone_epochs: 7
+  maximum_positive_weight: 2.0
+  pretrained_weights_path: weights/dinov2_vits14_pretrain.pth
+  run_root: runs/experiments/cc_real_h_s2_lr5_c6
+  seed: 0
+  turning_loss_weight: 1.0
+  unfreeze_schedule: []
+  use_amp: true
+  use_test: false

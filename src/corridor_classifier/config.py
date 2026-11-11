@@ -116,6 +116,7 @@ def _validate_config(config: Dict[str, Any]) -> None:
         "last_cls_regional3",
         "last_cls_regional5",
         "last_cls_regional3x2",
+        "last_cls_regional3_center",
     )
     if dino_readout not in valid_dino_readouts:
         raise ValueError(

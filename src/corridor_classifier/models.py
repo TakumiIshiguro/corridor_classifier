@@ -50,15 +50,37 @@ DINO_READOUTS = {
     "last_cls_regional3": (1, False, (1, 3)),
     "last_cls_regional5": (1, False, (1, 5)),
     "last_cls_regional3x2": (1, False, (2, 3)),
+    # Same bands as last_cls_regional3, but the columns that do not divide
+    # evenly go to the centre band so left and right stay the same width.
+    # A 16-column grid (224 px, patch 14) splits 5/6/5 here against 6/5/5.
+    "last_cls_regional3_center": (1, False, (1, 3)),
 }
+# Readouts whose leftover columns go to the centre band.
+CENTERED_REGIONAL_READOUTS = frozenset({"last_cls_regional3_center"})
+
+
+def _band_sizes(width: int, bands: int, center_remainder: bool):
+    if not center_remainder:
+        return None
+    base, remainder = divmod(int(width), int(bands))
+    sizes = [base] * int(bands)
+    sizes[int(bands) // 2] += remainder
+    return sizes
 
 
 def regional_patch_features(
-    dino: nn.Module, patch_tokens: torch.Tensor, rows: int, columns: int
+    dino: nn.Module,
+    patch_tokens: torch.Tensor,
+    rows: int,
+    columns: int,
+    center_remainder: bool = False,
 ) -> torch.Tensor:
     """Average-pools the last layer's patch tokens within a `rows` x
     `columns` grid of image bands, preserving which region of the image each
     feature came from instead of collapsing all patches into one vector.
+
+    With `center_remainder`, columns left over from an uneven split go to the
+    middle column band instead of the leftmost ones.
     """
     if not hasattr(dino, "patch_embed"):
         raise ValueError("DINO model must expose patch_embed for regional readouts")
@@ -70,9 +92,15 @@ def regional_patch_features(
             f"{num_patches} != {grid_height}x{grid_width}"
         )
     grid = patch_tokens.reshape(batch_size, grid_height, grid_width, channels)
+    column_sizes = _band_sizes(grid_width, columns, center_remainder)
     region_means = []
     for row_band in grid.tensor_split(int(rows), dim=1):
-        for cell in row_band.tensor_split(int(columns), dim=2):
+        cells = (
+            row_band.split(column_sizes, dim=2)
+            if column_sizes is not None
+            else row_band.tensor_split(int(columns), dim=2)
+        )
+        for cell in cells:
             region_means.append(cell.reshape(batch_size, -1, channels).mean(dim=1))
     return torch.cat(region_means, dim=-1)
 
@@ -106,7 +134,11 @@ def encode_dino_readout(
     if regional_rows > 0 and regional_columns > 0:
         features.append(
             regional_patch_features(
-                dino, outputs[-1][0], regional_rows, regional_columns
+                dino,
+                outputs[-1][0],
+                regional_rows,
+                regional_columns,
+                center_remainder=dino_readout in CENTERED_REGIONAL_READOUTS,
             )
         )
     if len(features) == 1:
